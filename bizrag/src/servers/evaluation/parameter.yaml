@@ -1,0 +1,17 @@
+save_path: bizrag/output/evaluate_results.json
+
+metrics: [ 'acc', 'f1', 'em', 'coverem', 'stringem', 'rouge-1', 'rouge-2', 'rouge-l' ]
+
+qrels_path: bizrag/data/qrels.txt
+run_path: bizrag/data/run.txt
+ks: [ 1, 5, 10, 20, 50, 100 ]
+ir_metrics: [ "mrr", "map", "recall", "ndcg", "precision" ]
+
+run_new_path: bizrag/data/run_new.txt
+run_old_path: bizrag/data/run_old.txt
+n_resamples: 10000
+
+pred_struct_ls: []
+gt_struct_ls: []
+pred_citations_ls: []
+gt_citations_ls: []

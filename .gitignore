@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Legacy old data dirs
+data/corpus/
+data/chunks/
+data/index/
+data/raw/
+corpora/
+embedding/
+index/
+
+# Project Data and Assets
+raw_knowledge/
+runtime/
+logs/
+output/
+state/

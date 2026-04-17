@@ -1,0 +1,6 @@
+servers:
+  evaluation: bizrag/src/servers/evaluation
+
+pipeline:
+- evaluation.evaluate_trec
+

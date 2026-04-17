@@ -1,0 +1,10 @@
+benchmark:
+  name: sample
+  path: bizrag/data/sample_nq_10.jsonl
+  key_map:
+    q_ls: question
+    gt_ls: golden_answers
+  limit: -1
+  shuffle: false
+  seed: 42
+

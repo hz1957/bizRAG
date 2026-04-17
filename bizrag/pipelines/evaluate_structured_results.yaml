@@ -1,0 +1,7 @@
+servers:
+  benchmark: bizrag/src/servers/benchmark
+  evaluation: bizrag/src/servers/evaluation
+
+pipeline:
+- benchmark.get_data
+- evaluation.evaluate_structured

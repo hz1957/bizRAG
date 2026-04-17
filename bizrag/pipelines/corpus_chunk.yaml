@@ -1,0 +1,5 @@
+servers:
+  corpus: bizrag/src/servers/corpus
+
+pipeline:
+- corpus.chunk_documents

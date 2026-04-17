@@ -1,0 +1,6 @@
+servers:
+  benchmark: bizrag/src/servers/benchmark
+
+pipeline:
+- benchmark.get_data
+

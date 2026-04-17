@@ -1,0 +1,14 @@
+corpus:
+  parameter: bizrag/src/servers/corpus/parameter.yaml
+  path: bizrag/src/servers/corpus/src/corpus.py
+  tools:
+    mineru_parse:
+      input:
+        parse_file_path: $parse_file_path
+        mineru_dir: $mineru_dir
+    build_mineru_corpus:
+      input:
+        mineru_dir: $mineru_dir
+        parse_file_path: $parse_file_path
+        text_corpus_save_path: $text_corpus_save_path
+        image_corpus_save_path: $image_corpus_save_path

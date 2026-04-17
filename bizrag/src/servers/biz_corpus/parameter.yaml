@@ -1,0 +1,4 @@
+parse_file_path: bizrag/data/raw/excel_files
+text_corpus_save_path: bizrag/data/corpus/business.jsonl
+sheet_mode: row
+include_header: true

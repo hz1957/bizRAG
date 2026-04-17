@@ -1,0 +1,104 @@
+Metadata-Version: 2.4
+Name: bizrag
+Version: 0.1.0
+Summary: Minimal UltraRAG SDK integration project
+Requires-Python: <3.13,>=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: ultrarag[corpus,retriever]>=0.3.0
+Requires-Dist: PyYAML
+
+# bizRAG
+
+`bizRAG` is a minimal integration project that uses the `ultrarag` Python package
+while keeping the local files that the current SDK still expects:
+
+- `servers/`
+- `examples/*.yaml`
+- `examples/parameter/*.yaml`
+- `examples/server/*_server.yaml`
+
+This layout matches the current UltraRAG SDK behavior:
+
+- `PipelineCall(...)` needs local pipeline YAML and parameter YAML files
+- `ToolCall.initialize(...)` needs a local `server_root`
+- `ToolCall` also expects `servers/<name>/server.yaml`
+
+## Install
+
+```bash
+pip install -e .
+```
+
+Editable install is recommended because the current SDK integration still reads local
+`servers/` and `examples/` files from the repository.
+
+The project depends on:
+
+- `ultrarag[retriever,corpus]`
+
+## Project Layout
+
+```text
+bizRAG/
+  bizrag/
+    sdk.py
+  docs/
+  examples/
+  servers/
+```
+
+## SDK Usage
+
+### ToolCall
+
+```python
+from bizrag.sdk import initialize_toolcall, build_text_corpus, chunk_documents
+
+initialize_toolcall(["corpus"])
+
+build_text_corpus(
+    parse_file_path="data/raw",
+    text_corpus_save_path="data/corpus/text.jsonl",
+)
+
+chunk_documents(
+    raw_chunk_path="data/corpus/text.jsonl",
+    chunk_path="data/chunks/chunks.jsonl",
+)
+```
+
+### PipelineCall
+
+```python
+from bizrag.sdk import run_named_pipeline
+
+run_named_pipeline(
+    "build_text_corpus",
+    parameter_file="examples/parameter/build_text_corpus_parameter.yaml",
+)
+```
+
+## Copied Files
+
+The following UltraRAG resources were copied into this project:
+
+- `servers/corpus`
+- `servers/retriever`
+- `examples/build_text_corpus.yaml`
+- `examples/corpus_chunk.yaml`
+- `examples/milvus_index.yaml`
+- matching `examples/parameter/*`
+- matching `examples/server/*`
+- `docs/SDKReference.md`
+- `docs/4BizAgentPlatform.md`
+
+## Notes
+
+- This is a source-style SDK integration, not a fully self-contained packaged SDK.
+- If UltraRAG changes server signatures, the copied `server.yaml` files may need to
+  be refreshed.
+- `milvus_index` still requires a reachable Milvus instance and valid embedding
+  backend configuration.
+- In the current UltraRAG implementation, the copied `milvus_index` example is set
+  to `is_demo: true` because that is the working path for Milvus indexing with
+  document contents included.

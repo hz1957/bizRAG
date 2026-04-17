@@ -1,0 +1,6 @@
+servers:
+  corpus: bizrag/src/servers/corpus
+
+pipeline:
+- corpus.mineru_parse
+- corpus.build_mineru_corpus

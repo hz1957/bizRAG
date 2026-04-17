@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bizrag"
+version = "0.1.0"
+description = "Minimal UltraRAG SDK integration project"
+readme = "README.md"
+requires-python = ">=3.11, <3.13"
+dependencies = [
+    "ultrarag[retriever,corpus]>=0.3.0",
+    "PyYAML",
+    "pandas",
+    "xlrd>=2.0.1",
+    "fastapi",
+    "uvicorn",
+    "rouge-score",
+    "tabulate",
+    "pytrec-eval",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bizrag*"]
