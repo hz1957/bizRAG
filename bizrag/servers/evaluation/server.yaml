@@ -1,5 +1,5 @@
-parameter: bizrag/src/servers/evaluation/parameter.yaml
-path: bizrag/src/servers/evaluation/src/evaluation.py
+parameter: bizrag/servers/evaluation/parameter.yaml
+path: bizrag/servers/evaluation/evaluation.py
 tools:
   evaluate:
     input:

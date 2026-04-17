@@ -4,147 +4,30 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
 import os
-import sys
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-import yaml
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CORPUS_SRC = PROJECT_ROOT / "bizrag" / "src" / "servers" / "corpus" / "src"
-BIZ_CORPUS_SRC = PROJECT_ROOT / "bizrag" / "src" / "servers" / "biz_corpus" / "src"
-RETRIEVER_SRC = PROJECT_ROOT / "bizrag" / "src" / "servers" / "retriever" / "src"
-
-for src_path in (CORPUS_SRC, BIZ_CORPUS_SRC, RETRIEVER_SRC):
-    src_str = str(src_path)
-    if src_str not in sys.path:
-        sys.path.insert(0, src_str)
-
-from biz_corpus import build_excel_corpus as build_excel_corpus_tool  # noqa: E402
-from corpus import (  # noqa: E402
-    build_mineru_corpus as build_mineru_corpus_tool,
-    build_text_corpus as build_text_corpus_tool,
-    chunk_documents as chunk_documents_tool,
-    mineru_parse as mineru_parse_tool,
+from bizrag.infra.metadata_store import MetadataStore
+from bizrag.service import orchestrator
+from bizrag.service.io_utils import (
+    dump_yaml,
+    load_jsonl,
+    load_yaml,
+    sha256_file,
+    write_jsonl,
 )
-from index_backends.milvus_backend import MilvusIndexBackend  # noqa: E402
-from retriever import Retriever, app as retriever_app  # noqa: E402
+from bizrag.service.kb_files import (
+    classify_source_type,
+    discover_supported_files,
+    normalize_source_uri,
+    should_ingest,
+)
 
-from bizrag.src.service.metadata_store import MetadataStore
-
-
-TEXT_EXTENSIONS = {
-    ".txt",
-    ".md",
-    ".docx",
-    ".doc",
-    ".wps",
-    ".pdf",
-    ".xps",
-    ".oxps",
-    ".epub",
-    ".mobi",
-    ".fb2",
-}
-EXCEL_EXTENSIONS = {".xls", ".xlsx"}
-SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | EXCEL_EXTENSIONS
-IGNORED_PREFIXES = {"~$"}
-
-
-def load_yaml(path: str | Path) -> Dict[str, Any]:
-    file_path = Path(path)
-    if not file_path.exists():
-        raise RuntimeError(f"Config file does not exist: {file_path}")
-    with file_path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def dump_yaml(path: str | Path, data: Dict[str, Any]) -> None:
-    file_path = Path(path)
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
-
-
-def load_jsonl(path: str | Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    with Path(path).open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rows.append(json.loads(line))
-    return rows
-
-
-def write_jsonl(path: str | Path, rows: Iterable[Dict[str, Any]]) -> None:
-    file_path = Path(path)
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
-def now_utc() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
-
-
-def sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def classify_source_type(path: Path) -> Optional[str]:
-    suffix = path.suffix.lower()
-    if suffix in EXCEL_EXTENSIONS:
-        return "excel"
-    if suffix in TEXT_EXTENSIONS:
-        return suffix.lstrip(".")
-    return None
-
-
-def discover_supported_files(path: Path) -> List[Path]:
-    if path.is_file():
-        return [path] if should_ingest(path) else []
-
-    files: List[Path] = []
-    for file_path in sorted(path.rglob("*")):
-        if file_path.is_file() and should_ingest(file_path):
-            files.append(file_path.resolve())
-    return files
-
-
-def should_ingest(path: Path) -> bool:
-    if any(path.name.startswith(prefix) for prefix in IGNORED_PREFIXES):
-        return False
-    return path.suffix.lower() in SUPPORTED_EXTENSIONS
-
-
-def default_chunk_backend_configs(chunk_overlap: int) -> Dict[str, Any]:
-    return {
-        "token": {"chunk_overlap": chunk_overlap},
-        "sentence": {
-            "chunk_overlap": chunk_overlap,
-            "min_sentences_per_chunk": 1,
-            "delim": "['.', '!', '?', '；', '。', '！', '？', '\\n']",
-        },
-        "recursive": {"min_characters_per_chunk": 12},
-    }
-
-
-async def invoke_tool(tool_obj: Any, /, **kwargs: Any) -> Any:
-    fn = getattr(tool_obj, "fn", None)
-    if fn is None:
-        raise RuntimeError(f"Tool object does not expose callable fn: {tool_obj!r}")
-    return await fn(**kwargs)
+logger = logging.getLogger("bizrag.kb_admin")
 
 
 class KBAdmin:
@@ -155,7 +38,7 @@ class KBAdmin:
         kb_registry_path: str | Path,
         workspace_root: str | Path,
     ) -> None:
-        self.store = MetadataStore(Path(metadata_db))
+        self.store = MetadataStore(metadata_db)
         self.kb_registry_path = Path(kb_registry_path)
         self.workspace_root = Path(workspace_root)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -251,14 +134,17 @@ class KBAdmin:
         raw_rows: List[Dict[str, Any]],
         kb_id: str,
         source_path: Path,
+        logical_source_uri: str,
+        logical_file_name: str,
         doc_key: str,
         content_hash: str,
         source_root: Optional[str],
     ) -> List[Dict[str, Any]]:
         relative_path = None
-        if source_root:
+        logical_source_path = Path(logical_source_uri)
+        if source_root and logical_source_path.exists():
             try:
-                relative_path = str(source_path.resolve().relative_to(Path(source_root).resolve()))
+                relative_path = str(logical_source_path.resolve().relative_to(Path(source_root).resolve()))
             except ValueError:
                 relative_path = None
 
@@ -266,7 +152,7 @@ class KBAdmin:
         for idx, row in enumerate(raw_rows):
             source_doc_id = row.get("id")
             doc_id = f"{doc_key}::{source_doc_id}" if source_doc_id is not None else f"{doc_key}::{idx}"
-            title = str(row.get("title") or source_path.stem)
+            title = str(row.get("title") or Path(logical_file_name).stem)
             contents = str(row.get("contents") or "").strip()
             if not contents:
                 continue
@@ -274,9 +160,9 @@ class KBAdmin:
             item["id"] = doc_id
             item["title"] = title
             item["contents"] = contents
-            item["file_name"] = source_path.name
+            item["file_name"] = logical_file_name
             item["source_type"] = classify_source_type(source_path) or str(row.get("source_type") or "")
-            item["source_uri"] = str(source_path.resolve())
+            item["source_uri"] = logical_source_uri
             item["kb_id"] = kb_id
             item["doc_version"] = content_hash
             item["content_hash"] = content_hash
@@ -293,6 +179,8 @@ class KBAdmin:
         raw_rows: List[Dict[str, Any]],
         doc_key: str,
         source_path: Path,
+        logical_source_uri: str,
+        logical_file_name: str,
         content_hash: str,
     ) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
@@ -300,9 +188,9 @@ class KBAdmin:
             item = dict(row)
             item["id"] = f"{doc_key}::chunk::{row.get('id', idx)}"
             item["doc_key"] = doc_key
-            item["file_name"] = str(item.get("file_name") or source_path.name)
+            item["file_name"] = str(item.get("file_name") or logical_file_name)
             item["source_type"] = str(item.get("source_type") or classify_source_type(source_path) or "")
-            item["source_uri"] = str(item.get("source_uri") or source_path.resolve())
+            item["source_uri"] = str(item.get("source_uri") or logical_source_uri)
             item["doc_version"] = str(item.get("doc_version") or content_hash)
             item["content_hash"] = str(item.get("content_hash") or content_hash)
             normalized.append(item)
@@ -314,11 +202,13 @@ class KBAdmin:
         corpus_rows: List[Dict[str, Any]],
         doc_key: str,
         source_path: Path,
+        logical_source_uri: str,
+        logical_file_name: str,
         content_hash: str,
     ) -> List[Dict[str, Any]]:
         chunks: List[Dict[str, Any]] = []
         for idx, row in enumerate(corpus_rows):
-            title = str(row.get("title") or source_path.stem)
+            title = str(row.get("title") or Path(logical_file_name).stem)
             contents = str(row.get("contents") or "").strip()
             if not contents:
                 continue
@@ -327,14 +217,94 @@ class KBAdmin:
             item["doc_id"] = str(row.get("id") or f"{doc_key}::{idx}")
             item["title"] = title
             item["contents"] = f"Title:\n{title}\n\nContent:\n{contents}"
-            item["file_name"] = str(item.get("file_name") or source_path.name)
+            item["file_name"] = str(item.get("file_name") or logical_file_name)
             item["source_type"] = str(item.get("source_type") or classify_source_type(source_path) or "")
-            item["source_uri"] = str(item.get("source_uri") or source_path.resolve())
+            item["source_uri"] = str(item.get("source_uri") or logical_source_uri)
             item["doc_version"] = str(item.get("doc_version") or content_hash)
             item["content_hash"] = str(item.get("content_hash") or content_hash)
             item["doc_key"] = doc_key
             chunks.append(item)
         return chunks
+
+    async def ingest_file(
+        self,
+        *,
+        kb_id: str,
+        path: str,
+        logical_source_uri: Optional[str],
+        logical_file_name: Optional[str],
+        force: bool,
+        prefer_mineru: bool,
+        chunk_backend: str,
+        chunk_size: int,
+        chunk_overlap: int,
+    ) -> Dict[str, Any]:
+        kb = self._get_kb(kb_id)
+        file_path = Path(path).resolve()
+        if not file_path.exists():
+            raise RuntimeError(f"Input path not found: {file_path}")
+        if not should_ingest(file_path):
+            raise RuntimeError(f"Unsupported file type: {file_path}")
+        source_uri = str(logical_source_uri or file_path)
+        existing_doc = self.store.get_document(kb_id, source_uri)
+
+        task_id = str(uuid.uuid4())
+        self.store.create_task(
+            task_id=task_id,
+            kb_id=kb_id,
+            task_type="ingest_file",
+            status="running",
+            source_uri=source_uri,
+            payload={
+                "path": str(file_path),
+                "logical_source_uri": logical_source_uri,
+                "logical_file_name": logical_file_name,
+                "force": force,
+                "prefer_mineru": prefer_mineru,
+                "chunk_backend": chunk_backend,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+            },
+        )
+        try:
+            result_type = await self._upsert_file(
+                kb=kb,
+                file_path=file_path,
+                logical_source_uri=logical_source_uri,
+                logical_file_name=logical_file_name,
+                force=force,
+                prefer_mineru=prefer_mineru,
+                chunk_backend=chunk_backend,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
+            active_doc = self.store.get_document(kb_id, source_uri)
+            index_mode = await self._sync_document_index(
+                kb=kb,
+                document=active_doc,
+                replace_existing=bool(existing_doc and existing_doc.get("status") == "active"),
+            )
+            result = {
+                "task_id": task_id,
+                "kb_id": kb_id,
+                "path": str(file_path),
+                "logical_source_uri": logical_source_uri or str(file_path),
+                "status": result_type,
+                "reindexed": True,
+                "index_mode": index_mode,
+            }
+            self.store.update_task(task_id, status="success", result=result)
+            return result
+        except Exception as exc:
+            self._record_failed_file(
+                kb=kb,
+                file_path=file_path,
+                error_message=str(exc),
+                logical_source_uri=logical_source_uri,
+                logical_file_name=logical_file_name,
+            )
+            self.store.update_task(task_id, status="failed", error_message=str(exc))
+            raise
 
     async def ingest_path(
         self,
@@ -379,13 +349,19 @@ class KBAdmin:
         deleted = 0
         changed = False
         failed_items: List[Dict[str, str]] = []
+        changed_docs: List[Dict[str, Any]] = []
+        replaced_doc_keys: List[str] = []
+        deleted_docs: List[Dict[str, Any]] = []
 
         try:
             for file_path in files:
                 try:
+                    existing_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
                     result = await self._upsert_file(
                         kb=kb,
                         file_path=file_path,
+                        logical_source_uri=None,
+                        logical_file_name=None,
                         force=force,
                         prefer_mineru=prefer_mineru,
                         chunk_backend=chunk_backend,
@@ -395,9 +371,17 @@ class KBAdmin:
                     if result == "created":
                         created += 1
                         changed = True
+                        active_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
+                        if active_doc is not None:
+                            changed_docs.append(active_doc)
                     elif result == "updated":
                         updated += 1
                         changed = True
+                        if existing_doc is not None and existing_doc.get("status") == "active":
+                            replaced_doc_keys.append(str(existing_doc["doc_key"]))
+                        active_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
+                        if active_doc is not None:
+                            changed_docs.append(active_doc)
                     else:
                         skipped += 1
                 except Exception as exc:
@@ -409,7 +393,7 @@ class KBAdmin:
                         }
                     )
                     self._record_failed_file(kb=kb, file_path=file_path, error_message=str(exc))
-                    retriever_app.logger.warning(
+                    logger.warning(
                         "[kb_admin] Failed to ingest %s: %s",
                         file_path,
                         exc,
@@ -417,12 +401,19 @@ class KBAdmin:
 
             if sync_deletions and input_path.is_dir():
                 deleted_docs = self._sync_deleted_documents(kb=kb, scanned_root=input_path, keep_paths=files)
-                deleted += deleted_docs
+                deleted += len(deleted_docs)
                 if deleted_docs:
                     changed = True
 
             if changed or force:
-                await self._rebuild_kb(kb)
+                index_mode = await self._sync_documents_index_batch(
+                    kb=kb,
+                    upsert_documents=changed_docs,
+                    replace_doc_keys=replaced_doc_keys,
+                    deleted_documents=deleted_docs,
+                )
+            else:
+                index_mode = "noop"
 
             result = {
                 "task_id": task_id,
@@ -434,6 +425,7 @@ class KBAdmin:
                 "failed": failed,
                 "deleted": deleted,
                 "reindexed": bool(changed or force),
+                "index_mode": index_mode,
             }
             if failed_items:
                 result["failed_items"] = failed_items
@@ -445,7 +437,8 @@ class KBAdmin:
 
     async def delete_document(self, *, kb_id: str, source_uri: str) -> Dict[str, Any]:
         kb = self._get_kb(kb_id)
-        resolved_source = str(Path(source_uri).resolve())
+        resolved_source = normalize_source_uri(source_uri)
+        existing_doc = self.store.get_document(kb_id, resolved_source)
         task_id = str(uuid.uuid4())
         self.store.create_task(
             task_id=task_id,
@@ -457,14 +450,17 @@ class KBAdmin:
         )
         try:
             deleted = self._mark_deleted(kb_id=kb_id, source_uri=resolved_source)
+            index_mode = None
             if deleted:
-                await self._rebuild_kb(kb)
+                index_mode = await self._sync_deleted_document_index(kb=kb, deleted_doc=existing_doc)
             result = {
                 "task_id": task_id,
                 "kb_id": kb_id,
                 "source_uri": resolved_source,
                 "deleted": deleted,
             }
+            if index_mode:
+                result["index_mode"] = index_mode
             self.store.update_task(task_id, status="success", result=result)
             return result
         except Exception as exc:
@@ -507,6 +503,18 @@ class KBAdmin:
                 chunk_size=int(payload.get("chunk_size", 512)),
                 chunk_overlap=int(payload.get("chunk_overlap", 50)),
             )
+        if task_type == "ingest_file":
+            return await self.ingest_file(
+                kb_id=task["kb_id"],
+                path=str(payload["path"]),
+                logical_source_uri=payload.get("logical_source_uri"),
+                logical_file_name=payload.get("logical_file_name"),
+                force=bool(payload.get("force", False)),
+                prefer_mineru=bool(payload.get("prefer_mineru", False)),
+                chunk_backend=str(payload.get("chunk_backend", "sentence")),
+                chunk_size=int(payload.get("chunk_size", 512)),
+                chunk_overlap=int(payload.get("chunk_overlap", 50)),
+            )
         if task_type == "delete_document":
             return await self.delete_document(
                 kb_id=task["kb_id"],
@@ -521,13 +529,16 @@ class KBAdmin:
         *,
         kb: Dict[str, Any],
         file_path: Path,
+        logical_source_uri: Optional[str],
+        logical_file_name: Optional[str],
         force: bool,
         prefer_mineru: bool,
         chunk_backend: str,
         chunk_size: int,
         chunk_overlap: int,
     ) -> str:
-        source_uri = str(file_path.resolve())
+        source_uri = str(logical_source_uri or file_path.resolve())
+        file_name = str(logical_file_name or file_path.name)
         doc_key = self._doc_key_for_source(source_uri)
         content_hash = sha256_file(file_path)
         source_type = classify_source_type(file_path)
@@ -553,6 +564,8 @@ class KBAdmin:
             raw_rows=raw_corpus_rows,
             kb_id=kb["kb_id"],
             source_path=file_path,
+            logical_source_uri=source_uri,
+            logical_file_name=file_name,
             doc_key=doc_key,
             content_hash=content_hash,
             source_root=kb.get("source_root"),
@@ -565,19 +578,17 @@ class KBAdmin:
             temp_chunk_path = Path(temp_chunk_file.name)
         try:
             try:
-                await invoke_tool(
-                    chunk_documents_tool,
+                await orchestrator.chunk_corpus(
                     raw_chunk_path=str(output_paths["corpus"]),
-                    chunk_backend_configs=default_chunk_backend_configs(chunk_overlap),
                     chunk_backend=chunk_backend,
-                    tokenizer_or_token_counter="character",
                     chunk_size=chunk_size,
                     chunk_path=str(temp_chunk_path),
                     use_title=True,
+                    chunk_overlap=chunk_overlap,
                 )
                 raw_chunk_rows = load_jsonl(temp_chunk_path)
             except Exception as exc:
-                retriever_app.logger.warning(
+                logger.warning(
                     "[kb_admin] chunk_documents failed for %s, fallback to passthrough chunks: %s",
                     file_path,
                     exc,
@@ -586,6 +597,8 @@ class KBAdmin:
                     corpus_rows=normalized_corpus,
                     doc_key=doc_key,
                     source_path=file_path,
+                    logical_source_uri=source_uri,
+                    logical_file_name=file_name,
                     content_hash=content_hash,
                 )
         finally:
@@ -596,6 +609,8 @@ class KBAdmin:
             raw_rows=raw_chunk_rows,
             doc_key=doc_key,
             source_path=file_path,
+            logical_source_uri=source_uri,
+            logical_file_name=file_name,
             content_hash=content_hash,
         )
         write_jsonl(output_paths["chunk"], normalized_chunks)
@@ -604,7 +619,7 @@ class KBAdmin:
             kb_id=kb["kb_id"],
             source_uri=source_uri,
             doc_key=doc_key,
-            file_name=file_path.name,
+            file_name=file_name,
             source_type=source_type,
             content_hash=content_hash,
             doc_version=content_hash,
@@ -620,8 +635,11 @@ class KBAdmin:
         kb: Dict[str, Any],
         file_path: Path,
         error_message: str,
+        logical_source_uri: Optional[str] = None,
+        logical_file_name: Optional[str] = None,
     ) -> None:
-        source_uri = str(file_path.resolve())
+        source_uri = str(logical_source_uri or file_path.resolve())
+        file_name = str(logical_file_name or file_path.name)
         doc_key = self._doc_key_for_source(source_uri)
         content_hash = sha256_file(file_path) if file_path.exists() else ""
         source_type = classify_source_type(file_path) or ""
@@ -629,7 +647,7 @@ class KBAdmin:
             kb_id=kb["kb_id"],
             source_uri=source_uri,
             doc_key=doc_key,
-            file_name=file_path.name,
+            file_name=file_name,
             source_type=source_type,
             content_hash=content_hash,
             doc_version=content_hash,
@@ -639,6 +657,183 @@ class KBAdmin:
             last_error=error_message,
         )
 
+    def _refresh_combined_artifacts(
+        self,
+        kb: Dict[str, Any],
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Path], Dict[str, Any]]:
+        combined_paths = self._combined_paths(kb)
+        active_docs = self.store.list_documents(kb["kb_id"], include_deleted=False)
+        write_jsonl(combined_paths["corpus"], self._iterate_jsonl_paths(active_docs, "corpus_path"))
+        write_jsonl(combined_paths["chunk"], self._iterate_jsonl_paths(active_docs, "chunk_path"))
+        runtime_cfg = self._build_runtime_retriever_config(kb, combined_paths)
+        dump_yaml(combined_paths["runtime_cfg"], runtime_cfg)
+        return active_docs, combined_paths, runtime_cfg
+
+    async def _sync_document_index(
+        self,
+        *,
+        kb: Dict[str, Any],
+        document: Optional[Dict[str, Any]],
+        replace_existing: bool,
+    ) -> str:
+        active_docs, _, runtime_cfg = self._refresh_combined_artifacts(kb)
+        if document is None or document.get("status") != "active":
+            if not active_docs:
+                await self._drop_collection(kb)
+                return "drop_collection"
+            rebuild = await self._rebuild_kb(kb)
+            return "full_rebuild" if rebuild else "full_rebuild"
+
+        try:
+            if replace_existing:
+                await self._delete_document_from_index(kb=kb, doc_key=str(document["doc_key"]))
+            await self._index_document_incremental(
+                kb=kb,
+                document=document,
+                runtime_cfg=runtime_cfg,
+            )
+            return "incremental"
+        except Exception as exc:
+            logger.warning(
+                "[kb_admin] Incremental index failed for %s, fallback to full rebuild: %s",
+                document.get("source_uri"),
+                exc,
+            )
+            await self._rebuild_kb(kb)
+            return "full_rebuild"
+
+    async def _sync_documents_index_batch(
+        self,
+        *,
+        kb: Dict[str, Any],
+        upsert_documents: List[Dict[str, Any]],
+        replace_doc_keys: List[str],
+        deleted_documents: List[Dict[str, Any]],
+    ) -> str:
+        active_docs, _, runtime_cfg = self._refresh_combined_artifacts(kb)
+        if not active_docs:
+            await self._drop_collection(kb)
+            return "drop_collection"
+
+        delete_doc_keys = {
+            str(doc["doc_key"])
+            for doc in deleted_documents
+            if doc is not None and doc.get("doc_key")
+        }
+        delete_doc_keys.update(key for key in replace_doc_keys if key)
+
+        dedup_upserts: Dict[str, Dict[str, Any]] = {}
+        for doc in upsert_documents:
+            if doc is None or doc.get("status") != "active" or not doc.get("doc_key"):
+                continue
+            dedup_upserts[str(doc["doc_key"])] = doc
+
+        try:
+            for doc_key in sorted(delete_doc_keys):
+                await self._delete_document_from_index(kb=kb, doc_key=doc_key)
+            if dedup_upserts:
+                await self._index_documents_incremental(
+                    kb=kb,
+                    documents=list(dedup_upserts.values()),
+                    runtime_cfg=runtime_cfg,
+                )
+            return "incremental_batch"
+        except Exception as exc:
+            logger.warning(
+                "[kb_admin] Batch incremental index failed for kb=%s, fallback to full rebuild: %s",
+                kb.get("kb_id"),
+                exc,
+            )
+            await self._rebuild_kb(kb)
+            return "full_rebuild"
+
+    async def _sync_deleted_document_index(
+        self,
+        *,
+        kb: Dict[str, Any],
+        deleted_doc: Optional[Dict[str, Any]],
+    ) -> str:
+        active_docs, _, _ = self._refresh_combined_artifacts(kb)
+        if not active_docs:
+            await self._drop_collection(kb)
+            return "drop_collection"
+        if deleted_doc is None:
+            await self._rebuild_kb(kb)
+            return "full_rebuild"
+
+        try:
+            await self._delete_document_from_index(kb=kb, doc_key=str(deleted_doc["doc_key"]))
+            return "incremental"
+        except Exception as exc:
+            logger.warning(
+                "[kb_admin] Incremental delete failed for %s, fallback to full rebuild: %s",
+                deleted_doc.get("source_uri"),
+                exc,
+            )
+            await self._rebuild_kb(kb)
+            return "full_rebuild"
+
+    async def _index_document_incremental(
+        self,
+        *,
+        kb: Dict[str, Any],
+        document: Dict[str, Any],
+        runtime_cfg: Dict[str, Any],
+    ) -> None:
+        await self._index_documents_incremental(
+            kb=kb,
+            documents=[document],
+            runtime_cfg=runtime_cfg,
+        )
+
+    async def _index_documents_incremental(
+        self,
+        *,
+        kb: Dict[str, Any],
+        documents: List[Dict[str, Any]],
+        runtime_cfg: Dict[str, Any],
+    ) -> None:
+        if not documents:
+            return
+
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as corpus_file:
+            batch_chunk_path = corpus_file.name
+        try:
+            rows: List[Dict[str, Any]] = []
+            for document in documents:
+                chunk_path = str(document.get("chunk_path") or "")
+                if not chunk_path or not Path(chunk_path).exists():
+                    raise RuntimeError(f"Chunk file not found for incremental index: {chunk_path}")
+                rows.extend(load_jsonl(chunk_path))
+            write_jsonl(batch_chunk_path, rows)
+
+            temp_dir = tempfile.mkdtemp(prefix="bizrag_inc_embed_")
+            embedding_path = str(Path(temp_dir) / "embeddings.npy")
+            try:
+                await orchestrator.build_milvus_index(
+                    runtime_cfg=runtime_cfg,
+                    corpus_path=batch_chunk_path,
+                    embedding_path=embedding_path,
+                    overwrite=False,
+                    collection_name=kb["collection_name"],
+                )
+            finally:
+                if os.path.exists(embedding_path):
+                    os.remove(embedding_path)
+                if os.path.isdir(temp_dir):
+                    os.rmdir(temp_dir)
+        finally:
+            if os.path.exists(batch_chunk_path):
+                os.remove(batch_chunk_path)
+
+    async def _delete_document_from_index(self, *, kb: Dict[str, Any], doc_key: str) -> int:
+        cfg = self._build_runtime_retriever_config(kb, self._combined_paths(kb))
+        return await orchestrator.delete_milvus_doc_key(
+            runtime_cfg=cfg,
+            collection_name=kb["collection_name"],
+            doc_key=doc_key,
+        )
+
     async def _build_raw_corpus(
         self,
         *,
@@ -646,42 +841,12 @@ class KBAdmin:
         output_paths: Dict[str, Path],
         prefer_mineru: bool,
     ) -> List[Dict[str, Any]]:
-        suffix = file_path.suffix.lower()
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as temp_file:
-            temp_corpus_path = Path(temp_file.name)
-        try:
-            if suffix in EXCEL_EXTENSIONS:
-                await invoke_tool(
-                    build_excel_corpus_tool,
-                    parse_file_path=str(file_path),
-                    text_corpus_save_path=str(temp_corpus_path),
-                )
-            elif suffix == ".pdf" and prefer_mineru:
-                text_output = temp_corpus_path
-                image_output = output_paths["images"].with_suffix(".jsonl")
-                await invoke_tool(
-                    mineru_parse_tool,
-                    parse_file_path=str(file_path),
-                    mineru_dir=str(output_paths["mineru"]),
-                    mineru_extra_params=None,
-                )
-                await invoke_tool(
-                    build_mineru_corpus_tool,
-                    mineru_dir=str(output_paths["mineru"]),
-                    parse_file_path=str(file_path),
-                    text_corpus_save_path=str(text_output),
-                    image_corpus_save_path=str(image_output),
-                )
-            else:
-                await invoke_tool(
-                    build_text_corpus_tool,
-                    parse_file_path=str(file_path),
-                    text_corpus_save_path=str(temp_corpus_path),
-                )
-            return load_jsonl(temp_corpus_path)
-        finally:
-            if temp_corpus_path.exists():
-                temp_corpus_path.unlink()
+        await orchestrator.build_raw_corpus(
+            file_path=file_path,
+            output_paths=output_paths,
+            prefer_mineru=prefer_mineru,
+        )
+        return load_jsonl(output_paths["corpus"])
 
     def _sync_deleted_documents(
         self,
@@ -689,16 +854,17 @@ class KBAdmin:
         kb: Dict[str, Any],
         scanned_root: Path,
         keep_paths: List[Path],
-    ) -> int:
+    ) -> List[Dict[str, Any]]:
         keep_uris = {str(path.resolve()) for path in keep_paths}
         prefix = str(scanned_root.resolve())
         if not prefix.endswith(os.sep):
             prefix = f"{prefix}{os.sep}"
-        deleted = 0
+        deleted_docs: List[Dict[str, Any]] = []
         for doc in self.store.list_documents(kb["kb_id"], include_deleted=False, source_prefix=prefix):
             if str(doc["source_uri"]) not in keep_uris:
-                deleted += int(self._mark_deleted(kb_id=kb["kb_id"], source_uri=str(doc["source_uri"])))
-        return deleted
+                if self._mark_deleted(kb_id=kb["kb_id"], source_uri=str(doc["source_uri"])):
+                    deleted_docs.append(doc)
+        return deleted_docs
 
     def _mark_deleted(self, *, kb_id: str, source_uri: str) -> bool:
         doc = self.store.get_document(kb_id, source_uri)
@@ -721,7 +887,7 @@ class KBAdmin:
         active_doc_count = len(active_docs)
         chunk_count = sum(1 for _ in self._iterate_jsonl_paths(active_docs, "chunk_path"))
         if chunk_count == 0:
-            self._drop_collection(kb)
+            await self._drop_collection(kb)
             return {
                 "kb_id": kb["kb_id"],
                 "collection_name": kb["collection_name"],
@@ -733,30 +899,12 @@ class KBAdmin:
         runtime_cfg = self._build_runtime_retriever_config(kb, combined_paths)
         dump_yaml(combined_paths["runtime_cfg"], runtime_cfg)
 
-        retriever = Retriever(retriever_app)
-        await retriever.retriever_init(
-            model_name_or_path=runtime_cfg["model_name_or_path"],
-            backend_configs=runtime_cfg["backend_configs"],
-            batch_size=runtime_cfg.get("batch_size", 32),
+        await orchestrator.build_milvus_index(
+            runtime_cfg=runtime_cfg,
             corpus_path=runtime_cfg["corpus_path"],
-            gpu_ids=runtime_cfg.get("gpu_ids"),
-            is_multimodal=runtime_cfg.get("is_multimodal", False),
-            backend=runtime_cfg.get("backend", "sentence_transformers"),
-            index_backend=runtime_cfg.get("index_backend", "milvus"),
-            index_backend_configs=runtime_cfg.get("index_backend_configs", {}),
-            is_demo=runtime_cfg.get("is_demo", False),
-            collection_name=runtime_cfg.get("collection_name", kb["collection_name"]),
-        )
-        await retriever.retriever_embed(
-            embedding_path=runtime_cfg["embedding_path"],
-            overwrite=True,
-            is_multimodal=runtime_cfg.get("is_multimodal", False),
-        )
-        await retriever.retriever_index(
             embedding_path=runtime_cfg["embedding_path"],
             overwrite=True,
             collection_name=kb["collection_name"],
-            corpus_path=runtime_cfg["corpus_path"],
         )
         return {
             "kb_id": kb["kb_id"],
@@ -796,17 +944,12 @@ class KBAdmin:
         cfg["index_backend_configs"]["milvus"]["uri"] = kb["index_uri"]
         return cfg
 
-    def _drop_collection(self, kb: Dict[str, Any]) -> None:
+    async def _drop_collection(self, kb: Dict[str, Any]) -> None:
         cfg = self._build_runtime_retriever_config(kb, self._combined_paths(kb))
-        milvus_backend = MilvusIndexBackend(
-            contents=[],
-            config=cfg.get("index_backend_configs", {}).get("milvus", {}),
-            logger=retriever_app.logger,
+        await orchestrator.drop_milvus_collection(
+            runtime_cfg=cfg,
+            collection_name=kb["collection_name"],
         )
-        try:
-            milvus_backend.drop_collection(kb["collection_name"])
-        finally:
-            milvus_backend.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -815,7 +958,7 @@ def parse_args() -> argparse.Namespace:
         "--metadata-db",
         type=str,
         default="bizrag/state/metadata.db",
-        help="SQLite metadata store path",
+        help="SQLite metadata DB path or MySQL DSN",
     )
     parser.add_argument(
         "--kb-registry",

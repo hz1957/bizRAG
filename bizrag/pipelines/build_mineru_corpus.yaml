@@ -1,5 +1,5 @@
 servers:
-  corpus: bizrag/src/servers/corpus
+  corpus: bizrag/servers/corpus
 
 pipeline:
 - corpus.mineru_parse

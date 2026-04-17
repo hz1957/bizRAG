@@ -1,0 +1,51 @@
+name: smoke-rabbitmq
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  rabbitmq-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0
+
+      - name: Run RabbitMQ smoke test
+        env:
+          PYTHON_BIN: python
+          MANAGE_RABBITMQ: "0"
+          AMQP_URL: amqp://guest:guest@127.0.0.1:5672/
+          RABBITMQ_HOST: 127.0.0.1
+          RABBITMQ_PORT: "5672"
+          TMP_ROOT: /tmp/bizrag_ci_smoke
+          QUEUE_NAME: bizrag.rustfs.ci
+        run: |
+          chmod +x scripts/rabbitmq_e2e.sh scripts/ci_smoke_rabbitmq.sh
+          ./scripts/ci_smoke_rabbitmq.sh

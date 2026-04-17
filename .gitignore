@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+.DS_Store
+*.egg-info/
 .venv/
 
 # Legacy old data dirs
@@ -17,3 +19,4 @@ runtime/
 logs/
 output/
 state/
+bizrag/state/

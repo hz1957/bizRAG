@@ -13,6 +13,7 @@ import uuid
 
 from fastmcp.exceptions import ValidationError, NotFoundError, ToolError
 from ultrarag.server import UltraRAG_MCP_Server
+
 try:
     from .index_backends import BaseIndexBackend, create_index_backend
     from .websearch_backends import create_websearch_backend
@@ -36,6 +37,14 @@ class Retriever:
         mcp_inst.tool(
             self.retriever_index,
             output="embedding_path,overwrite,collection_name,corpus_path->None",
+        )
+        mcp_inst.tool(
+            self.retriever_delete,
+            output="collection_name,filter_expr->deleted_count",
+        )
+        mcp_inst.tool(
+            self.retriever_drop_collection,
+            output="collection_name->None",
         )
         mcp_inst.tool(
             self.retriever_search,
@@ -887,6 +896,36 @@ class Retriever:
 
             info_msg = f"[{self.index_backend_name}] Indexing success."
             app.logger.info(info_msg)
+
+    async def retriever_delete(
+        self,
+        collection_name: str,
+        filter_expr: str,
+    ) -> int:
+        if self.index_backend is None:
+            raise RuntimeError("Index backend is not initialized.")
+        if not filter_expr:
+            raise ValidationError("filter_expr is required")
+        try:
+            return int(
+                self.index_backend.delete_by_filter(
+                    collection_name=collection_name,
+                    filter_expr=filter_expr,
+                )
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+
+    async def retriever_drop_collection(
+        self,
+        collection_name: str,
+    ) -> None:
+        if self.index_backend is None:
+            raise RuntimeError("Index backend is not initialized.")
+        try:
+            self.index_backend.drop_collection(collection_name)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
 
     async def _encode_queries(
         self,

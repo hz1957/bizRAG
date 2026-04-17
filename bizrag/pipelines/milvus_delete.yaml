@@ -1,0 +1,6 @@
+servers:
+  retriever: bizrag/servers/retriever
+
+pipeline:
+- retriever.retriever_init
+- retriever.retriever_delete

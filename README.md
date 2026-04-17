@@ -25,7 +25,9 @@ Editable install is recommended because the current SDK integration still reads 
 
 The project depends on:
 
-- `ultrarag[retriever,corpus]`
+- the official `OpenBMB/UltraRAG` source package (installed from GitHub, not the unrelated PyPI `ultrarag 1.0.0` package)
+- `PyMySQL` for MySQL-backed metadata storage
+- evaluation dependencies are optional and can be installed with `pip install -e ".[eval]"`
 
 ## Linux Notes
 
@@ -43,19 +45,42 @@ runtime dependencies are the important ones:
 ```text
 bizRAG/
   bizrag/
-    src/
+    sdk.py
+    service/
+    servers/
     pipelines/
     config/
 ```
 
+Phase 5 deployment scaffolding is now included:
+
+- `docker-compose.yml`
+- `docker/Dockerfile`
+- `docker/start_bizrag.sh`
+- `.env.example`
+- `bizrag/config/retriever_docker.yaml`
+
+## Architecture Rules
+
+Current project convention is `pipeline-first` for write paths.
+
+- Standard write path: `service -> orchestrator -> sdk -> pipelines -> servers`
+- Applies to: ingest, chunk, index, delete, rebuild, evaluation
+- `service` should not directly orchestrate `servers` for multi-step write flows
+- `retrieve/extract` are the current online read-path exception and may stay direct
+
+If a new write capability is added, the expected order is:
+
+1. add or reuse `bizrag/pipelines/*.yaml`
+2. expose it via `bizrag/sdk.py` and `bizrag/service/orchestrator.py`
+3. call it from `bizrag/service/*`
+
 ## SDK Usage
 
-### ToolCall
+### SDK Helpers
 
 ```python
-from bizrag.sdk import initialize_toolcall, build_text_corpus, chunk_documents
-
-initialize_toolcall(["corpus"])
+from bizrag.sdk import build_text_corpus, chunk_documents
 
 build_text_corpus(
     parse_file_path="data/raw",
@@ -75,7 +100,6 @@ from bizrag.sdk import run_named_pipeline
 
 run_named_pipeline(
     "build_text_corpus",
-    parameter_file="examples/parameter/build_text_corpus_parameter.yaml",
 )
 ```
 
@@ -98,8 +122,8 @@ The following UltraRAG resources were copied into this project:
 Phase 1 adds a BizAgent-facing retrieve service:
 
 ```bash
-python -m bizrag.service.retrieve_api \
-  --retriever-config bizrag/src/servers/retriever/parameter.yaml \
+python -m bizrag.entrypoints.retrieve_api \
+  --retriever-config bizrag/servers/retriever/parameter.yaml \
   --kb-registry bizrag/config/kb_registry.yaml
 ```
 
@@ -144,6 +168,78 @@ Example extract request:
 ## Docs
 
 - BizAgent 平台接入与分阶段计划：[bizrag/docs/BizAgentPlatform.md](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/bizrag/docs/BizAgentPlatform.md:1)
+- 项目结构与分层约束：[bizrag/docs/ProjectStructure.md](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/bizrag/docs/ProjectStructure.md:1)
+
+## Phase 5 Deployment Template
+
+The repository now includes a first-pass container deployment template for:
+
+- `rustfs`
+- `rabbitmq`
+- `milvus`
+- `mysql`
+- `bizrag`
+
+Use:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Notes:
+
+- `bizrag` currently runs API, MQ bridge, and worker in one container.
+- `rustfs` is provided as a Phase 5 placeholder service behind the `rustfs` profile.
+  Replace `RUSTFS_IMAGE` in `.env` with the actual image used in your environment, then start it with:
+
+```bash
+docker compose --profile rustfs up --build
+```
+
+- Metadata storage is expected to use MySQL in this deployment template.
+- MySQL database and user are initialized by the standard `mysql` image environment variables in `.env`.
+- BizRAG metadata tables are created automatically by `MetadataStore` on first startup; no separate SQL bootstrap is required for the current schema.
+- `HF_CACHE_DIR` can be pointed at an existing HuggingFace cache directory to avoid downloading embedding models again inside the container.
+
+### Docker Dev Hot Reload
+
+The `bizrag` service is now configured for source-mounted development by default:
+
+- `./bizrag -> /app/bizrag`
+- `./docker -> /app/docker`
+- `./pyproject.toml -> /app/pyproject.toml`
+
+`BIZRAG_HOT_RELOAD` defaults to `true` in `docker-compose.yml`.
+When enabled, the container runs a small supervisor that watches the mounted source tree
+and automatically restarts:
+
+- the retrieve API
+- the RustFS worker
+- the RustFS MQ bridge
+
+This is intended for day-to-day service development, so changes under `bizrag/` or
+`docker/` usually take effect without rebuilding the image.
+
+Typical workflow:
+
+```bash
+docker compose up -d --build
+docker compose logs -f bizrag
+```
+
+If you edit Python dependencies in `pyproject.toml`, you still need to rebuild the image:
+
+```bash
+docker compose up -d --build bizrag
+```
+
+To disable hot reload for a more production-like local run, set:
+
+```bash
+export BIZRAG_HOT_RELOAD=false
+docker compose up -d bizrag
+```
 
 ## Evaluation
 
@@ -180,6 +276,11 @@ The Phase 2 admin persists state in:
 
 - `bizrag/state/metadata.db`
 - `runtime/kbs/<kb_id>/...`
+
+`--metadata-db` currently accepts either:
+
+- a local SQLite file path, such as `bizrag/state/metadata.db`
+- a MySQL DSN, such as `mysql+pymysql://user:password@127.0.0.1:3306/bizrag`
 
 ## Notes
 

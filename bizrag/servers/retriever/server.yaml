@@ -1,5 +1,5 @@
-parameter: bizrag/src/servers/retriever/parameter.yaml
-path: bizrag/src/servers/retriever/src/retriever.py
+parameter: bizrag/servers/retriever/parameter.yaml
+path: bizrag/servers/retriever/retriever.py
 tools:
   retriever_init:
     input:
@@ -20,6 +20,18 @@ tools:
       overwrite: $overwrite
       collection_name: $collection_name
       corpus_path: $corpus_path
+  retriever_embed:
+    input:
+      embedding_path: $embedding_path
+      overwrite: $overwrite
+      is_multimodal: $is_multimodal
+  retriever_delete:
+    input:
+      collection_name: $collection_name
+      filter_expr: $filter_expr
+  retriever_drop_collection:
+    input:
+      collection_name: $collection_name
   retriever_search:
     input:
       query_list: null

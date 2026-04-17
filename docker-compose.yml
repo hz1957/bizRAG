@@ -1,0 +1,164 @@
+services:
+  rustfs:
+    image: ${RUSTFS_IMAGE:-ghcr.io/rustfs/rustfs:latest}
+    profiles: ["rustfs"]
+    restart: unless-stopped
+    ports:
+      - "${RUSTFS_PORT:-9000}:9000"
+    volumes:
+      - ./runtime/rustfs:/data
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - ./runtime/rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-bizrag}
+      MYSQL_USER: ${MYSQL_USER:-bizrag}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-bizrag}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - ./runtime/mysql:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -u${MYSQL_USER:-bizrag} -p${MYSQL_PASSWORD:-bizrag}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command:
+      - /usr/local/bin/etcd
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --data-dir=/etcd
+    volumes:
+      - ./runtime/etcd:/etcd
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/usr/local/bin/etcdctl",
+          "--endpoints=http://127.0.0.1:2379",
+          "endpoint",
+          "health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: ["minio", "server", "/data", "--console-address", ":9001"]
+    volumes:
+      - ./runtime/minio:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  milvus:
+    image: milvusdb/milvus:v2.4.17
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_HEALTH_PORT:-9091}:9091"
+    volumes:
+      - ./runtime/milvus:/var/lib/milvus
+
+  bizrag:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["/bin/sh", "/app/docker/start_bizrag.sh"]
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+    environment:
+      APP_ROOT: /app
+      BIZRAG_HOST: 0.0.0.0
+      BIZRAG_PORT: 64501
+      BIZRAG_RETRIEVER_CONFIG: /app/bizrag/config/retriever_docker.yaml
+      BIZRAG_KB_REGISTRY: /app/bizrag/config/kb_registry.yaml
+      BIZRAG_METADATA_DB: mysql+pymysql://${MYSQL_USER:-bizrag}:${MYSQL_PASSWORD:-bizrag}@mysql:3306/${MYSQL_DATABASE:-bizrag}
+      BIZRAG_WORKSPACE_ROOT: /app/runtime/kbs
+      BIZRAG_RUSTFS_TOKEN: ${BIZRAG_RUSTFS_TOKEN:-}
+      BIZRAG_RUSTFS_SHARED_SECRET: ${BIZRAG_RUSTFS_SHARED_SECRET:-}
+      BIZRAG_HOT_RELOAD: ${BIZRAG_HOT_RELOAD:-true}
+      BIZRAG_RUN_API: "true"
+      BIZRAG_RUN_WORKER: "true"
+      BIZRAG_RUN_MQ_BRIDGE: "true"
+      BIZRAG_MQ_BACKEND: rabbitmq
+      BIZRAG_RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672/
+      BIZRAG_RABBITMQ_QUEUE: ${RUSTFS_RABBITMQ_QUEUE:-bizrag.rustfs.events}
+      BIZRAG_RABBITMQ_PREFETCH: ${BIZRAG_RABBITMQ_PREFETCH:-20}
+      BIZRAG_WORKER_POLL_INTERVAL: ${BIZRAG_WORKER_POLL_INTERVAL:-2.0}
+      BIZRAG_WORKER_BATCH_SIZE: ${BIZRAG_WORKER_BATCH_SIZE:-10}
+      BIZRAG_MAX_EVENTS_PER_MESSAGE: ${BIZRAG_MAX_EVENTS_PER_MESSAGE:-100}
+      BIZRAG_WAIT_FOR: mysql:3306,rabbitmq:5672,milvus:19530
+      BIZRAG_WAIT_TIMEOUT: ${BIZRAG_WAIT_TIMEOUT:-90}
+    ports:
+      - "${BIZRAG_PORT:-64501}:64501"
+    volumes:
+      - ./bizrag:/app/bizrag
+      - ./docker:/app/docker
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./runtime:/app/runtime
+      - ./logs:/app/logs
+      - ./output:/app/output
+      - ./raw_knowledge:/app/raw_knowledge
+      - ./bizrag/config/kb_registry.yaml:/app/bizrag/config/kb_registry.yaml
+      - ${HF_CACHE_DIR:-./runtime/hf_cache}:/app/.cache/huggingface

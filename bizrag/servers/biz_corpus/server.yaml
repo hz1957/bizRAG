@@ -1,5 +1,5 @@
-parameter: bizrag/src/servers/biz_corpus/parameter.yaml
-path: bizrag/src/servers/biz_corpus/src/biz_corpus.py
+parameter: bizrag/servers/biz_corpus/parameter.yaml
+path: bizrag/servers/biz_corpus/biz_corpus.py
 tools:
   build_excel_corpus:
     input:

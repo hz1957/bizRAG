@@ -2,9 +2,10 @@
 
 # MCP Server
 servers:
-  retriever: bizrag/src/servers/retriever
+  retriever: bizrag/servers/retriever
 
 # MCP Client Pipeline
 pipeline:
 - retriever.retriever_init
+- retriever.retriever_embed
 - retriever.retriever_index

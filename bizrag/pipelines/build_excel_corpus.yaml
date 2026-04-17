@@ -1,4 +1,4 @@
 servers:
-  biz_corpus: bizrag/src/servers/biz_corpus
+  biz_corpus: bizrag/servers/biz_corpus
 pipeline:
 - biz_corpus.build_excel_corpus

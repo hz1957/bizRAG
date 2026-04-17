@@ -1,5 +1,5 @@
 servers:
-  evaluation: bizrag/src/servers/evaluation
+  evaluation: bizrag/servers/evaluation
 
 pipeline:
 - evaluation.evaluate_trec_pvalue

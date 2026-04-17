@@ -1,2 +1,0 @@
-ultrarag[corpus,retriever]>=0.3.0
-PyYAML

@@ -1,5 +1,5 @@
-parameter: bizrag/src/servers/benchmark/parameter.yaml
-path: bizrag/src/servers/benchmark/src/benchmark.py
+parameter: bizrag/servers/benchmark/parameter.yaml
+path: bizrag/servers/benchmark/benchmark.py
 tools:
   get_data:
     input:

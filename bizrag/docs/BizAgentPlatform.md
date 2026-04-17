@@ -19,8 +19,13 @@
 - `corpus.chunk_documents`：支持 `token`、`sentence`、`recursive` 三种 chunk 策略
 - `biz_corpus.build_excel_corpus`：支持 Excel 按 sheet / 行转文本
 - `retriever.retriever_init + retriever.retriever_index + retriever.retriever_search`：支持向量建索引与检索
-- `bizrag.service.retrieve_api`：对外暴露 `POST /api/v1/retrieve`
+- `bizrag.api`：承载 HTTP API 应用、路由、schema 和依赖装配
+- `bizrag.entrypoints.retrieve_api`：作为 HTTP 进程入口，负责加载配置并启动 API 应用
+- `bizrag.service.kb_admin`：对外暴露知识库注册、导入、删除、重建等管理命令
+- `bizrag.sdk`：对外暴露本地 pipeline 运行入口
 - `benchmark` / `evaluation`：支持基础离线评测
+- `bizrag.infra.metadata_store`：当前已支持 `SQLite / MySQL` 双后端，默认仍可用本地 `metadata.db`
+- `bizrag.contracts`：沉淀 API、worker、MQ bridge 共用的数据契约
 
 当前仍然存在的限制：
 
@@ -29,7 +34,45 @@
 - 已落 `retrieve` 和最小规则式 `extract` API，但还没有接入生成式抽取模型
 - 评测能力已接入项目，但还没有形成正式业务评测集
 
-因此，当前项目不适合直接视为“已完成的平台服务”，更准确的状态是：Phase 1 已完成最小闭环，Phase 2 已进入知识库管理能力落地阶段。
+因此，当前项目不适合直接视为“已完成的平台服务”，更准确的状态是：Phase 1、Phase 2 已完成最小可用闭环，Phase 3 已落最小抽取与结构化评测能力，Phase 4 已完成最小接入版本，Phase 5 仍未开始。
+
+### 1.1 当前仓库入口约定
+
+本轮结构收敛后，当前项目统一采用以下入口：
+
+- Python SDK：`bizrag.sdk`
+- API 进程入口：`bizrag.entrypoints.retrieve_api`
+- Worker 进程入口：`bizrag.entrypoints.rustfs_worker`
+- MQ Bridge 进程入口：`bizrag.entrypoints.rustfs_mq_bridge`
+- HTTP 应用实现：`bizrag.api`
+- 管理入口：`bizrag.service.kb_admin`
+- 底层 server 根路径：`bizrag/servers/<name>`
+
+兼容说明：
+
+- `bizrag.service.rustfs_worker`
+- `bizrag.service.rustfs_mq_bridge`
+
+这两个旧路径仍然保留，但现在只是兼容包装。
+
+不再使用旧的 `bizrag.src.*` 作为公开调用路径。
+
+### 1.2 当前分层约束
+
+当前项目采用 `pipeline-first` 约束，目的是避免平台层直接耦合底层处理算子。
+
+- 写链路标准路径：`service -> orchestrator -> sdk -> pipelines -> servers`
+- 适用范围：知识库导入、chunk、索引、删除、重建、评测
+- 约束原则：`service` 不直接编排 `servers`
+- 当前例外：`retrieve/extract` 仍属于在线读链路，可直接走封装服务
+
+这意味着：
+
+- 平台接入层负责接请求、做鉴权、记任务、管状态
+- pipeline 层负责把多个原子能力拼成可复用流程
+- server 层只负责单一能力本身，不承载平台业务流程
+
+当前 `kb_admin` 已完成该约束收敛：导入、切块、增量索引、删除和重建均通过 pipeline 执行。
 
 ## 2. 推荐总体架构
 
@@ -62,6 +105,25 @@ data/knowledge_base/
 ```text
 raw -> corpus -> chunks -> milvus_index -> retrieve
 ```
+
+在当前工程实现中，建议进一步明确为：
+
+```text
+RustFS / Admin API
+  -> service
+  -> orchestrator
+  -> sdk
+  -> pipelines
+  -> servers
+  -> Milvus / metadata
+```
+
+其中：
+
+- `service` 负责平台语义
+- `pipelines` 负责流程复用
+- `servers` 负责底层原子能力
+- `sdk` 只是 pipeline 调用桥接器，不是平台主入口
 
 ## 3. 统一数据模型
 
@@ -187,13 +249,18 @@ Linux 部署补充：
 
 ## 5. 推荐 Pipeline 设计
 
+本节不仅描述 pipeline 示例，也作为项目内写链路实现规范：
+
+- 新增写链路功能时，优先补 pipeline，而不是在 `service` 中直接 import `servers`
+- `service` 侧只应调用 `orchestrator` 或 `sdk`，不应散落底层 server 细节
+
 ### 5.1 文本类入库 Pipeline
 
 适用于 `md/doc/docx/pdf/txt`：
 
 ```yaml
 servers:
-  corpus: bizrag/src/servers/corpus
+  corpus: bizrag/servers/corpus
 
 pipeline:
 - corpus.build_text_corpus
@@ -203,7 +270,7 @@ pipeline:
 
 ```yaml
 servers:
-  corpus: bizrag/src/servers/corpus
+  corpus: bizrag/servers/corpus
 
 pipeline:
 - corpus.mineru_parse
@@ -214,7 +281,7 @@ pipeline:
 
 ```yaml
 servers:
-  biz_corpus: bizrag/src/servers/biz_corpus
+  biz_corpus: bizrag/servers/biz_corpus
 
 pipeline:
 - biz_corpus.build_excel_corpus
@@ -224,7 +291,7 @@ pipeline:
 
 ```yaml
 servers:
-  corpus: bizrag/src/servers/corpus
+  corpus: bizrag/servers/corpus
 
 pipeline:
 - corpus.chunk_documents
@@ -259,7 +326,7 @@ corpus:
 
 ```yaml
 servers:
-  retriever: bizrag/src/servers/retriever
+  retriever: bizrag/servers/retriever
 
 pipeline:
 - retriever.retriever_init
@@ -352,6 +419,32 @@ query -> structured retriever
 filters -> milvus filter
 ret_items -> 业务结构化包装
 ```
+
+当前启动示例：
+
+```bash
+python -m bizrag.entrypoints.retrieve_api \
+  --retriever-config bizrag/servers/retriever/parameter.yaml \
+  --kb-registry bizrag/config/kb_registry.yaml
+```
+
+当前服务还同时暴露：
+
+- `POST /api/v1/extract`
+- `POST /api/v1/admin/kbs/register`
+- `POST /api/v1/admin/kbs/ingest`
+- `POST /api/v1/admin/kbs/delete-document`
+- `POST /api/v1/admin/kbs/rebuild`
+- `GET /api/v1/admin/kbs`
+- `GET /api/v1/admin/kbs/{kb_id}/documents`
+- `GET /api/v1/admin/tasks`
+- `GET /api/v1/admin/events`
+- `POST /api/v1/admin/tasks/{task_id}/retry`
+- `POST /api/v1/admin/events/{event_id}/replay`
+- `POST /api/v1/events/rustfs`
+- `POST /api/v1/events/rustfs/batch`
+- `POST /api/v1/events/rustfs/queue`
+- `POST /api/v1/events/rustfs/queue/batch`
 
 ### 7.2 后续建议增强
 
@@ -474,6 +567,103 @@ POST /api/v1/extract
 
 优先使用 Webhook。
 
+当前项目已提供最小事件接入端点：
+
+```text
+POST /api/v1/events/rustfs
+POST /api/v1/events/rustfs/batch
+POST /api/v1/events/rustfs/queue
+POST /api/v1/events/rustfs/queue/batch
+```
+
+当前实现约束：
+
+- 事件可以通过以下任一种方式携带内容：
+  - 本地可访问路径：`payload_path`
+  - 远程下载地址：`download_url`
+  - 内联文本：`payload_text`
+  - Base64 内容：`payload_base64`
+- `document.created` / `document.updated` 会映射为 `ingest-path`
+- `document.deleted` 会映射为 `delete-document`
+- `document.renamed` 会执行“删除旧路径 + 导入新路径”
+- 如果使用远程 URL 或内联内容，BizRAG 会先物化为临时文件，再按稳定的 `source_uri` 入库
+- 为了保证后续删除和重命名能定位到原文档，事件中仍建议稳定提供 `source_uri` / `old_source_uri` / `new_source_uri`
+- 支持通过 `X-Rustfs-Token` 做共享令牌校验
+- 支持通过 `X-Rustfs-Timestamp` + `X-Rustfs-Signature` 做 HMAC-SHA256 签名校验
+- 所有 RustFS 事件会落到 `rustfs_events` 表，支持查询与重放
+- 批量事件端点可作为消息队列消费者的落地入口，由上游消费者聚合后转发到 BizRAG
+- 当前项目已新增独立 worker：`python -m bizrag.service.rustfs_worker`
+- 推荐接法是“事件先入队，再由 worker 异步消费”，避免 webhook 长时间阻塞
+- 当前项目已新增 MQ bridge：`python -m bizrag.service.rustfs_mq_bridge`
+- Kafka / RabbitMQ 推荐作为上游事件总线，bridge 负责把外部消息转存到 SQLite 队列
+
+当前推荐部署链路：
+
+```text
+RustFS -> Kafka / RabbitMQ -> rustfs_mq_bridge -> SQLite rustfs_events -> rustfs_worker -> BizRAG ingest/delete/index
+```
+
+启动示例：
+
+```bash
+pip install .[mq]
+python -m bizrag.service.rustfs_mq_bridge \
+  --backend kafka \
+  --bootstrap-servers localhost:9092 \
+  --topic bizrag.rustfs.events
+```
+
+```bash
+python -m bizrag.service.rustfs_mq_bridge \
+  --backend rabbitmq \
+  --amqp-url amqp://guest:guest@127.0.0.1/ \
+  --queue bizrag.rustfs.events
+```
+
+```bash
+python -m bizrag.service.rustfs_worker \
+  --metadata-db bizrag/state/metadata.db \
+  --poll-interval 2 \
+  --batch-size 10
+```
+
+联调脚本：
+
+```bash
+./scripts/rabbitmq_e2e.sh
+```
+
+CI smoke test：
+
+```bash
+./scripts/ci_smoke_rabbitmq.sh
+```
+
+推荐事件示例：
+
+```json
+{
+  "event_type": "document.updated",
+  "kb_id": "rust_docs",
+  "source_uri": "rustfs://service/order_api_001",
+  "file_name": "order_api.md",
+  "content_type": "text/markdown",
+  "download_url": "https://rustfs.internal/api/v1/files/order_api_001/content"
+}
+```
+
+或：
+
+```json
+{
+  "event_type": "document.created",
+  "kb_id": "rust_docs",
+  "source_uri": "rustfs://service/faq_001",
+  "file_name": "faq_001.md",
+  "payload_text": "# FAQ\\n\\n这里是文档正文"
+}
+```
+
 ### 8.3 事件模型
 
 Rust 文档系统建议向 BizAgentPlatform 推送如下事件：
@@ -517,9 +707,9 @@ Rust 文档系统建议向 BizAgentPlatform 推送如下事件：
 
 当前状态：
 
-- 已开始落地
-- 代码已接入项目
-- 仍需真实依赖与真实数据联调
+- 已完成
+- 已完成真实代码落地、包结构收敛和 CLI 入口统一
+- 已具备最小联调和离线评测闭环
 
 ### Phase 2：知识库接入与索引编排
 
@@ -542,7 +732,7 @@ Rust 文档系统建议向 BizAgentPlatform 推送如下事件：
 当前实现：
 
 - 已新增 `bizrag.service.kb_admin`
-- 已新增 SQLite 元数据存储：`bizrag/state/metadata.db`
+- 已新增可切换的元数据存储层：默认可使用 SQLite `bizrag/state/metadata.db`，Phase 5 可切到 MySQL DSN
 - 已支持 `register-kb`、`ingest-path`、`delete-document`、`rebuild-kb`、`retry-task`
 - 已支持目录扫描、内容 hash 去重、文档级 corpus/chunk 产物、集合级重建
 - 已支持自动同步 `bizrag/config/kb_registry.yaml`
@@ -608,20 +798,107 @@ python -m bizrag.service.kb_admin \
 - 当前抽取还不是生成式 schema filling，而是基于证据片段的规则抽取
 - 更复杂的跨段推理、表格聚合和单位换算仍需要后续引入 LLM 或专门解析器
 
-### Phase 4：生产化与运维能力
+### Phase 4：平台接入与服务化
+
+目标：把当前能力从“可本地运行”推进到“可被上游文档系统和平台标准化接入”。
+
+包括：
+
+- 增加知识库管理型 HTTP API，替代纯 CLI 方式接入
+- 增加 RustFS 文档系统接入适配层
+- 支持 `document.created/updated/deleted/renamed` 事件驱动导入
+- 建设 webhook / 事件消费能力
+- 建设平台侧任务编排与状态回传能力
+- 从 KB 级重建逐步演进到文档级增量更新
+
+交付结果：
+
+- BizRAG 可作为平台标准知识库服务能力被外部系统调用
+- RustFS 等文档系统可以通过统一协议接入
+- 文档系统更新可以自动驱动知识库同步
+
+当前状态：
+
+- 已完成可联调版本
+- 已新增管理型 HTTP API
+- 已新增 RustFS 事件接入端点
+- 已新增 RustFS 事件批量接入、事件查询和事件重放接口
+- 已新增 RustFS 事件入队接口和独立异步消费 worker
+- 已新增 Kafka / RabbitMQ 适配桥接进程
+- 当前 RustFS 接入已支持本地路径、远程下载地址和内联内容三种接法
+- 已支持共享 token 和 HMAC 签名校验
+- 已支持失败事件留痕和显式重放
+- 已支持基于 SQLite 持久化队列的事件消费
+- 已支持 `Kafka/RabbitMQ -> SQLite queue -> worker` 的两段式消费架构
+- 已支持单文档导入、RustFS 更新和单文档删除的局部索引更新
+- 已支持目录级批量同步的批量增量更新
+- 当前仅在批量增量更新失败时回退到 KB 级重建
+
+Phase 4 当前归属：
+
+- 属于 Phase 4：
+  - RustFS webhook 接入
+  - 事件认证与签名校验
+  - 事件落库、查询、失败补偿和重放
+  - 事件入队和独立 worker 消费
+  - Kafka / RabbitMQ 适配层
+  - 批量事件接入和队列友好型消费入口
+  - 单文档局部索引更新
+- 属于 Phase 5：
+  - 多租户隔离
+  - 平台级权限控制
+  - 监控、告警、审计、限流、发布回滚等生产治理
+
+### Phase 5：生产化与运维能力
 
 目标：把服务推进到平台正式接入所需的稳定度。
 
 包括：
 
-- 补监控、日志、trace、告警
-- 补缓存、限流、超时、重试
-- 做多租户与权限隔离
-- 增加健康检查、容量与成本治理
-- 建立 CI/CD、回归测试和回滚流程
+- 可观测性与运行诊断
+  - 补统一日志、trace、metrics
+  - 补健康检查、核心指标看板、告警规则
+  - 覆盖 ingest、queue、worker、index、retrieve、extract 等关键链路
+- 稳定性与流量治理
+  - 补超时、重试、限流、熔断、幂等控制
+  - 补队列积压监控、死信策略、失败补偿
+  - 增加容量评估与成本治理
+- 安全与租户隔离
+  - 做多租户隔离
+  - 做平台级权限控制
+  - 增加密钥与配置管理
+  - 增加审计日志
+- 交付与发布治理
+  - 补 Docker 镜像与部署模板
+  - 明确标准容器化部署形态：`rustfs`、`rabbitmq`、`milvus`、`mysql`、`bizrag`
+  - 提供 `docker-compose` 级部署模板，明确容器职责、网络关系、挂载目录和健康检查
+  - `bizrag` 在当前阶段可先保持单容器部署；当读写压力、扩容和故障隔离要求上来后，再拆分为 `bizrag-api` 和 `bizrag-worker`
+  - 建立 CI/CD、smoke test、回归门禁
+  - 建立灰度、回滚、版本兼容策略
+- 数据可靠性
+  - 补 SQLite / Milvus 数据备份恢复
+  - 增加索引一致性检查
+  - 输出灾难恢复与运维 runbook
 
 交付结果：
 
 - 服务可稳定运行
 - 出问题可定位、可回滚
+- 数据可恢复、可审计
 - 具备正式接入条件
+- 形成统一的标准部署拓扑，便于测试、预发和生产环境复用
+
+当前仓库已补第一版部署模板：
+
+- [docker-compose.yml](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/docker-compose.yml:1)
+- [docker/Dockerfile](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/docker/Dockerfile:1)
+- [docker/start_bizrag.sh](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/docker/start_bizrag.sh:1)
+- [bizrag/config/retriever_docker.yaml](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/bizrag/config/retriever_docker.yaml:1)
+
+说明：
+
+- 当前模板默认 `bizrag` 单容器运行 `retrieve_api + rustfs_mq_bridge + rustfs_worker`
+- `mysql` 作为 metadata 控制面存储
+- MySQL 库和账号由容器环境变量初始化，BizRAG 自己会在首次启动时自动建 metadata 表
+- `milvus` 作为独立向量检索组件
+- `rustfs` 服务在模板中以占位方式提供，需按实际环境替换 `RUSTFS_IMAGE`；默认放在 `rustfs` profile 下，不会在基础 compose 启动时自动拉起

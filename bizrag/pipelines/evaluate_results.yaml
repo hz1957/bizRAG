@@ -1,6 +1,6 @@
 servers:
-  benchmark: bizrag/src/servers/benchmark
-  evaluation: bizrag/src/servers/evaluation
+  benchmark: bizrag/servers/benchmark
+  evaluation: bizrag/servers/evaluation
 
 pipeline:
 - benchmark.get_data

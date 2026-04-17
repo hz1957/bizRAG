@@ -1,0 +1,14 @@
+.git
+.idea
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+bizrag.egg-info/
+runtime/
+logs/
+output/
+raw_knowledge/
+reference/

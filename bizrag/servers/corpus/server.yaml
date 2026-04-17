@@ -1,5 +1,5 @@
-parameter: bizrag/src/servers/corpus/parameter.yaml
-path: bizrag/src/servers/corpus/src/corpus.py
+parameter: bizrag/servers/corpus/parameter.yaml
+path: bizrag/servers/corpus/corpus.py
 tools:
   build_text_corpus:
     input:
