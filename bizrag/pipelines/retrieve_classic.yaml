@@ -1,0 +1,23 @@
+servers:
+  custom: bizrag/servers/custom
+  dense: bizrag/servers/retriever
+  sparse: bizrag/servers/retriever
+  merge: bizrag/servers/custom
+  reranker: bizrag/servers/reranker
+
+pipeline:
+- custom.build_classic_read_inputs
+- dense.retriever_init
+- sparse.retriever_init
+- dense.retriever_search_structured:
+    output:
+      ret_items: ret_items
+- sparse.bm25_search_structured:
+    output:
+      ret_items: temp_items
+- merge.merge_retrieve_items:
+    input:
+      ret_items: ret_items
+      temp_items: temp_items
+- reranker.reranker_init
+- reranker.reranker_rerank_items

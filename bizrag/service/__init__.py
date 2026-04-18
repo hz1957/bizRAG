@@ -1,1 +1,1 @@
-"""BizRAG service entrypoints."""
+"""BizRAG service layer."""

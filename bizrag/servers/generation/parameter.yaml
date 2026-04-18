@@ -1,0 +1,13 @@
+backend: openai
+backend_configs:
+  openai:
+    model_name: ""
+    base_url: ""
+    api_key: ""
+sampling_params:
+  temperature: 0.2
+  top_p: 0.95
+  max_tokens: 1024
+extra_params: {}
+system_prompt: ""
+prompt_ls: []

@@ -1,0 +1,10 @@
+parameter: bizrag/servers/prompt/parameter.yaml
+path: bizrag/servers/prompt/prompt.py
+tools:
+  qa_rag_boxed:
+    input:
+      q_ls: $q_ls
+      ret_psg: $ret_psg
+      template: $template
+    output:
+    - prompt_ls

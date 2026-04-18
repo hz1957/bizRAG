@@ -29,6 +29,8 @@ tools:
     input:
       collection_name: $collection_name
       filter_expr: $filter_expr
+    output:
+    - deleted_count
   retriever_drop_collection:
     input:
       collection_name: $collection_name
@@ -38,3 +40,32 @@ tools:
       top_k: $top_k
       query_instruction: $query_instruction
       collection_name: $collection_name
+    output:
+    - ret_psg
+  retriever_search_structured:
+    input:
+      query_list: $query_list
+      top_k: $top_k
+      query_instruction: $query_instruction
+      collection_name: $collection_name
+      filters: $filters
+      output_fields: $output_fields
+    output:
+    - ret_items
+  bm25_index:
+    input:
+      overwrite: $overwrite
+  bm25_search:
+    input:
+      query_list: $query_list
+      top_k: $top_k
+    output:
+    - ret_psg
+  bm25_search_structured:
+    input:
+      query_list: $query_list
+      top_k: $top_k
+      filters: $filters
+      output_fields: $output_fields
+    output:
+    - ret_items

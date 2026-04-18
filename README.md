@@ -1,14 +1,14 @@
 # bizRAG
 
 `bizRAG` is a minimal integration project that uses the `ultrarag` Python package
-while keeping the local files that the current SDK still expects:
+while keeping the local pipeline and server assets that UltraRAG expects:
 
 - `servers/`
 - `examples/*.yaml`
 - `examples/parameter/*.yaml`
 - `examples/server/*_server.yaml`
 
-This layout matches the current UltraRAG SDK behavior:
+This layout matches the current UltraRAG pipeline behavior:
 
 - `PipelineCall(...)` needs local pipeline YAML and parameter YAML files
 - `ToolCall.initialize(...)` needs a local `server_root`
@@ -20,8 +20,8 @@ This layout matches the current UltraRAG SDK behavior:
 pip install -e .
 ```
 
-Editable install is recommended because the current SDK integration still reads local
-`servers/` and `examples/` files from the repository.
+Editable install is recommended because the current integration reads local
+`servers/` and `pipelines/` files from the repository.
 
 The project depends on:
 
@@ -45,7 +45,6 @@ runtime dependencies are the important ones:
 ```text
 bizRAG/
   bizrag/
-    sdk.py
     service/
     servers/
     pipelines/
@@ -58,48 +57,38 @@ Phase 5 deployment scaffolding is now included:
 - `docker/Dockerfile`
 - `docker/start_bizrag.sh`
 - `.env.example`
-- `bizrag/config/retriever_docker.yaml`
+- `bizrag/servers/retriever/parameter.docker.yaml`
 
 ## Architecture Rules
 
-Current project convention is `pipeline-first` for write paths.
+Current project convention is `pipeline-first`.
 
-- Standard write path: `service -> orchestrator -> sdk -> pipelines -> servers`
+- Standard write path: `endpoint -> service/app -> pipelines -> servers`
 - Applies to: ingest, chunk, index, delete, rebuild, evaluation
 - `service` should not directly orchestrate `servers` for multi-step write flows
-- `retrieve/extract` are the current online read-path exception and may stay direct
+- `retrieve/extract` now follow `endpoint -> service -> pipelines -> servers`
 
 If a new write capability is added, the expected order is:
 
 1. add or reuse `bizrag/pipelines/*.yaml`
-2. expose it via `bizrag/sdk.py` and `bizrag/service/orchestrator.py`
-3. call it from `bizrag/service/*`
+2. call it from `bizrag/service/app/*` with `bizrag/service/ultrarag/runner.py`
+3. keep UltraRAG-specific adaptation inside `servers/*` or pipeline companion yaml when possible
 
-## SDK Usage
+## Pipeline Runner
 
-### SDK Helpers
-
-```python
-from bizrag.sdk import build_text_corpus, chunk_documents
-
-build_text_corpus(
-    parse_file_path="data/raw",
-    text_corpus_save_path="data/corpus/text.jsonl",
-)
-
-chunk_documents(
-    raw_chunk_path="data/corpus/text.jsonl",
-    chunk_path="data/chunks/chunks.jsonl",
-)
-```
-
-### PipelineCall
+Internal pipeline execution is handled by `bizrag/service/ultrarag/runner.py`.
 
 ```python
-from bizrag.sdk import run_named_pipeline
+from bizrag.service.ultrarag.runner import DEFAULT_PIPELINE_RUNNER
 
-run_named_pipeline(
+await DEFAULT_PIPELINE_RUNNER.run(
     "build_text_corpus",
+    params={
+        "corpus": {
+            "parse_file_path": "data/raw",
+            "text_corpus_save_path": "data/corpus/text.jsonl",
+        }
+    },
 )
 ```
 
@@ -119,12 +108,11 @@ The following UltraRAG resources were copied into this project:
 
 ## Retrieve API
 
-Phase 1 adds a BizAgent-facing retrieve service:
+Phase 1 adds a BizAgent-facing HTTP API:
 
 ```bash
-python -m bizrag.entrypoints.retrieve_api \
-  --retriever-config bizrag/servers/retriever/parameter.yaml \
-  --kb-registry bizrag/config/kb_registry.yaml
+python -m bizrag.entrypoints.api_http \
+  --metadata-db bizrag/state/metadata.db
 ```
 
 Example request:
@@ -257,15 +245,15 @@ Phase 2 adds a local KB admin entry for metadata storage, directory sync, docume
 and collection rebuild:
 
 ```bash
-python -m bizrag.service.kb_admin \
+python -m bizrag.entrypoints.kb_admin_cli \
   register-kb \
   --kb-id bizrag_bcrp \
-  --retriever-config bizrag/config/retriever_phase1_local.yaml \
+  --retriever-config bizrag/servers/retriever/parameter.local.yaml \
   --source-root raw_knowledge/真实案例
 ```
 
 ```bash
-python -m bizrag.service.kb_admin \
+python -m bizrag.entrypoints.kb_admin_cli \
   ingest-path \
   --kb-id bizrag_bcrp \
   --path raw_knowledge/真实案例/案例1 \

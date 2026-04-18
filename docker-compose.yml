@@ -131,8 +131,6 @@ services:
       APP_ROOT: /app
       BIZRAG_HOST: 0.0.0.0
       BIZRAG_PORT: 64501
-      BIZRAG_RETRIEVER_CONFIG: /app/bizrag/config/retriever_docker.yaml
-      BIZRAG_KB_REGISTRY: /app/bizrag/config/kb_registry.yaml
       BIZRAG_METADATA_DB: mysql+pymysql://${MYSQL_USER:-bizrag}:${MYSQL_PASSWORD:-bizrag}@mysql:3306/${MYSQL_DATABASE:-bizrag}
       BIZRAG_WORKSPACE_ROOT: /app/runtime/kbs
       BIZRAG_RUSTFS_TOKEN: ${BIZRAG_RUSTFS_TOKEN:-}
@@ -160,5 +158,4 @@ services:
       - ./logs:/app/logs
       - ./output:/app/output
       - ./raw_knowledge:/app/raw_knowledge
-      - ./bizrag/config/kb_registry.yaml:/app/bizrag/config/kb_registry.yaml
       - ${HF_CACHE_DIR:-./runtime/hf_cache}:/app/.cache/huggingface

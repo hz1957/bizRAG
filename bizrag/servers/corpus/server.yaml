@@ -5,6 +5,17 @@ tools:
     input:
       parse_file_path: $parse_file_path
       text_corpus_save_path: $text_corpus_save_path
+  mineru_parse:
+    input:
+      parse_file_path: $parse_file_path
+      mineru_dir: $mineru_dir
+      mineru_extra_params: $mineru_extra_params
+  build_mineru_corpus:
+    input:
+      mineru_dir: $mineru_dir
+      parse_file_path: $parse_file_path
+      text_corpus_save_path: $text_corpus_save_path
+      image_corpus_save_path: $image_corpus_save_path
   chunk_documents:
     input:
       raw_chunk_path: $raw_chunk_path

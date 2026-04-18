@@ -5,26 +5,22 @@
 以下是详细的项目层级及文件职能拆解：
 
 ## bizrag (核心业务目录)
-包含对外 SDK、HTTP API、应用服务、基础设施适配、底层 server 实现、pipeline 配置和项目内文档。
-
-### sdk.py
-- **职能**：执行桥接器 (Pipeline Runner)。
-- **说明**：将上层服务传递过来的 Python 参数，动态拼装并覆盖到底层的 YAML 配置上，从而驱动本地 pipeline 执行。对外统一使用 `from bizrag.sdk import ...`。
+包含 HTTP API、应用服务、基础设施适配、底层 server 实现、pipeline 配置和项目内文档。
 
 ### api (HTTP 接入层)
 - **职能**：承载 FastAPI 应用、路由、HTTP 依赖注入和错误收口。
-- **说明**：真正的 HTTP 路由定义在 `bizrag/api/routers/*`，应用装配在 `bizrag/api/app.py`，进程入口位于 `bizrag/entrypoints/retrieve_api.py`。
+- **说明**：真正的 HTTP 路由定义在 `bizrag/api/routers/*`，应用装配在 `bizrag/api/app.py`，进程入口位于 `bizrag/entrypoints/api_http.py`。
 ##### app.py
 - **职能**：创建 `FastAPI` 应用并注册各类路由。
 ##### deps.py
-- **职能**：统一装配 `KBAdmin`、检索服务和 API 运行时配置。
+- **职能**：统一装配 `KBAdmin`、读服务和 API 运行时配置。
 ##### schemas.py
 - **职能**：兼容导出 HTTP 层使用的 schema；共享模型的真实定义已迁到 `bizrag/contracts/schemas.py`。
-##### routers/retrieve.py
+##### routers/read_http.py
 - **职能**：提供 `/healthz`、`/api/v1/retrieve`、`/api/v1/extract`。
-##### routers/admin.py
+##### routers/kb_admin_http.py
 - **职能**：提供知识库管理、任务查询和事件重放接口。
-##### routers/rustfs.py
+##### routers/rustfs_http.py
 - **职能**：提供 RustFS webhook、批量接入和入队接口。
 
 ### contracts (共享契约层)
@@ -35,40 +31,47 @@
 
 ### service (业务服务层)
 - **职能**：承载应用层逻辑与业务编排，不直接暴露 HTTP 路由。
-- **约束**：默认遵循 `service -> orchestrator -> sdk -> pipelines -> servers`。
-- **说明**：写链路不应直接 import `servers` 执行业务动作，而应通过编排层驱动 pipeline；在线读链路如 `retrieve/extract` 可保留直连封装服务，但不应在 `service` 中散落底层算子调用。
-##### kb_admin.py
-- **职能**：知识库管理员中控台。提供创立知识库、接收文件导入指令、触发入库与全文向量索引重建的逻辑。
-- **说明**：当前已按 `pipeline-first` 收敛，导入、chunk、增量索引、删除和重建均通过 `service/orchestrator.py` 调用 pipelines。
-##### orchestrator.py
-- **职能**：服务编排适配层。
-- **说明**：负责把 `service` 侧的业务动作翻译为稳定的 pipeline 调用，屏蔽 YAML 名称、参数格式和底层 server 细节，是 `pipeline-first` 约束的落点。
-##### retrieval_service.py
+- **约束**：默认遵循 `service/app -> service/ultrarag -> pipelines -> servers`。
+- **说明**：`service/app` 负责平台状态与业务语义，`service/ultrarag` 负责极薄的 UltraRAG 调用适配；写链路不应直接 import `servers` 执行业务动作。
+##### ultrarag/pipeline_runner.py
+- **职能**：UltraRAG pipeline 执行适配器。
+- **说明**：负责定位 `bizrag/pipelines/*.yaml` 与 companion `bizrag/pipelines/server/*_server.yaml`，生成参数文件并调用 `PipelineCall`。
+##### app/kb_admin.py
+- **职能**：知识库管理员核心业务对象。提供创立知识库、接收文件导入指令、触发入库与全文向量索引重建的逻辑。
+- **说明**：当前已按 `pipeline-first` 收敛，CLI 启动逻辑已迁到 `bizrag/entrypoints/kb_admin_cli.py`，索引编排已拆到 `app/kb_indexer.py`。
+##### app/kb_indexer.py
+- **职能**：知识库索引编排与重建适配层。
+##### app/kb_artifacts.py
+- **职能**：文档产物路径、规范化和 chunk 回退构造等辅助逻辑。
+##### app/kb_files.py
+- **职能**：知识库文件发现、类型判定与 source URI 规范化。
+##### ultrarag/pipeline_outputs.py
+- **职能**：UltraRAG pipeline 返回结果提取工具。
+##### ultrarag/read_service.py
 - **职能**：在线检索应用服务。
-- **说明**：封装 `Retriever` 的延迟初始化、检索执行和命中结果标准化，供 API 层调用。
-##### rustfs_event_service.py
+- **说明**：只负责把 HTTP 读请求交给 `retrieve_classic` / `rag_answer` pipeline，并把结果转回契约对象。
+##### app/kb_config.py
+- **职能**：物化 KB 专属最终 server 配置，并提供 KB 配置读取工具。
+- **说明**：`register-kb` 时会把 workspace 路径、collection、index URI 写入 KB 自己的最终 YAML，运行时不再做默认参数继承。
+##### ultrarag/server_parameters.py
+- **职能**：加载 server 默认参数并解析 `base_config` 覆盖，供 KB 配置物化阶段使用。
+##### ultrarag/read_pipeline_payload.py
+- **职能**：把 KB 最终参数和读请求输入组装成 `retrieve_classic` / `rag_answer` 的 pipeline payload。
+##### app/rustfs_events.py
 - **职能**：RustFS 事件应用服务。
 - **说明**：封装签名校验、payload 落地、事件处理、入队和重放逻辑，供 API、worker 和 MQ bridge 复用。
-##### rustfs_worker.py
-- **职能**：RustFS worker 兼容入口包装。
-- **说明**：真实进程入口已迁到 `bizrag.entrypoints.rustfs_worker`；当前文件仅保留兼容导出。
-##### rustfs_mq_bridge.py
-- **职能**：RustFS MQ bridge 兼容入口包装。
-- **说明**：真实进程入口已迁到 `bizrag.entrypoints.rustfs_mq_bridge`；当前文件仅保留兼容导出。
-##### extract_engine.py
+##### app/extract_engine.py
 - **职能**：RAG 抽取引擎。负责对检索后的事实片段进行规则化或后续模型化处理，提炼结构化业务洞察。
-##### errors.py
-- **职能**：服务层错误类型定义。
-- **说明**：统一承载 `BadRequest / Unauthorized / NotFound / ServiceUnavailable` 等非 HTTP 业务异常，供 API 层映射为 `HTTPException`。
-
 ### entrypoints (进程入口层)
-- **职能**：承载 API、worker、MQ bridge 的 CLI 启动入口。
+- **职能**：承载 API、KB admin、worker、MQ bridge 的 CLI 启动入口。
 - **说明**：用于把“进程启动逻辑”从 `service` 中抽离，避免业务层继续混入参数解析和进程编排。
-##### retrieve_api.py
-- **职能**：加载 API 配置并启动 Uvicorn。
-##### rustfs_worker.py
+##### api_http.py
+- **职能**：加载 HTTP API 配置并启动 Uvicorn。
+##### kb_admin_cli.py
+- **职能**：启动知识库管理 CLI。
+##### rustfs_worker_cli.py
 - **职能**：启动 RustFS 持久化事件 worker。
-##### rustfs_mq_bridge.py
+##### rustfs_mq_bridge_cli.py
 - **职能**：启动 Kafka / RabbitMQ 到本地事件队列的桥接进程。
 
 ### infra (基础设施适配层)
@@ -76,6 +79,15 @@
 ##### metadata_store.py
 - **职能**：知识库元数据库操作层。记录 KB、文档、任务和 RustFS 事件状态，管理防重入库和事件补偿的幂等逻辑。
 - **说明**：当前已支持 `SQLite / MySQL` 双后端；默认仍可使用本地 `metadata.db`，Phase 5 可切到 MySQL 作为正式控制面存储。
+
+### common (共享基础工具)
+- **职能**：承载跨层复用的时间、IO 和通用异常定义。
+##### time_utils.py
+- **职能**：提供统一的 UTC 时间工具。
+##### io_utils.py
+- **职能**：提供 YAML/JSONL 读写与文件哈希工具。
+##### errors.py
+- **职能**：提供跨 API / app service 复用的通用业务异常。
 
 ### servers (底层处理插件节点 / MCP Servers)
 - **职能**：定义细粒度、单一职责的 “加工组件模型” (例如专门只为切块，或者只读 Excel 写的逻辑)。
@@ -106,11 +118,6 @@
 - **职能**：将大段结构化语料拆解为适合灌库的 Token 向量大小片段的切块流水线。
 #### milvus_index.yaml / milvus_delete.yaml / milvus_drop_collection.yaml
 - **职能**：承接向量索引写入、按文档删除和集合删除，是知识库写链路的标准索引编排入口。
-
-### config (项目微调配置档)
-- **职能**：启动测试、算法微调所需的独立参配。
-#### retriever_phase1_local.yaml
-- **职能**：提供在阶段一召回开发测试时的人工评测入参参数大全。
 
 ### docs (项目内文档)
 - **职能**：维护 BizRAG 自己的架构说明、平台接入方案和阶段规划。
@@ -168,7 +175,7 @@
 为避免代码再次回退到 `service` 直调 `servers` 的耦合模式，当前项目约定如下：
 
 1. 写链路默认使用 `pipeline-first`
-   - 标准路径：`service -> orchestrator -> sdk -> pipelines -> servers`
+   - 标准路径：`service/app -> service/ultrarag -> pipelines -> servers`
    - 适用范围：`ingest`、`chunk`、`index`、`delete`、`rebuild`、`evaluation`
 
 2. `service` 不直接承载底层算子编排
@@ -186,7 +193,7 @@
 
 5. 新增写链路功能时的默认顺序
    - 先补 `pipelines/*.yaml`
-   - 再补 `sdk.py` / `service/orchestrator.py`
+   - 再补对应 `servers/*` 或 pipeline companion 的参数适配
    - 最后由 `service` 接入
 
 ---

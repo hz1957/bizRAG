@@ -4,8 +4,6 @@ set -eu
 APP_ROOT="${APP_ROOT:-/app}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
-BIZRAG_RETRIEVER_CONFIG="${BIZRAG_RETRIEVER_CONFIG:-$APP_ROOT/bizrag/config/retriever_docker.yaml}"
-BIZRAG_KB_REGISTRY="${BIZRAG_KB_REGISTRY:-$APP_ROOT/bizrag/config/kb_registry.yaml}"
 BIZRAG_METADATA_DB="${BIZRAG_METADATA_DB:-$APP_ROOT/bizrag/state/metadata.db}"
 BIZRAG_WORKSPACE_ROOT="${BIZRAG_WORKSPACE_ROOT:-$APP_ROOT/runtime/kbs}"
 BIZRAG_HOST="${BIZRAG_HOST:-0.0.0.0}"
@@ -86,20 +84,18 @@ trap cleanup INT TERM EXIT
 
 if [ "$BIZRAG_RUN_MQ_BRIDGE" = "true" ] && [ "$BIZRAG_MQ_BACKEND" != "none" ]; then
   if [ "$BIZRAG_MQ_BACKEND" = "rabbitmq" ]; then
-    "$PYTHON_BIN" -m bizrag.service.rustfs_mq_bridge \
+    "$PYTHON_BIN" -m bizrag.entrypoints.rustfs_mq_bridge_cli \
       --backend rabbitmq \
       --metadata-db "$BIZRAG_METADATA_DB" \
-      --kb-registry "$BIZRAG_KB_REGISTRY" \
       --workspace-root "$BIZRAG_WORKSPACE_ROOT" \
       --amqp-url "$BIZRAG_RABBITMQ_URL" \
       --queue "$BIZRAG_RABBITMQ_QUEUE" \
       --prefetch-count "$BIZRAG_RABBITMQ_PREFETCH" \
       --max-events-per-message "$BIZRAG_MAX_EVENTS_PER_MESSAGE" &
   else
-    "$PYTHON_BIN" -m bizrag.service.rustfs_mq_bridge \
+    "$PYTHON_BIN" -m bizrag.entrypoints.rustfs_mq_bridge_cli \
       --backend kafka \
       --metadata-db "$BIZRAG_METADATA_DB" \
-      --kb-registry "$BIZRAG_KB_REGISTRY" \
       --workspace-root "$BIZRAG_WORKSPACE_ROOT" \
       --bootstrap-servers "$BIZRAG_KAFKA_BOOTSTRAP" \
       --topic "$BIZRAG_KAFKA_TOPIC" \
@@ -110,9 +106,8 @@ if [ "$BIZRAG_RUN_MQ_BRIDGE" = "true" ] && [ "$BIZRAG_MQ_BACKEND" != "none" ]; t
 fi
 
 if [ "$BIZRAG_RUN_WORKER" = "true" ]; then
-  "$PYTHON_BIN" -m bizrag.service.rustfs_worker \
+  "$PYTHON_BIN" -m bizrag.entrypoints.rustfs_worker_cli \
     --metadata-db "$BIZRAG_METADATA_DB" \
-    --kb-registry "$BIZRAG_KB_REGISTRY" \
     --workspace-root "$BIZRAG_WORKSPACE_ROOT" \
     --poll-interval "$BIZRAG_WORKER_POLL_INTERVAL" \
     --batch-size "$BIZRAG_WORKER_BATCH_SIZE" &
@@ -120,9 +115,7 @@ if [ "$BIZRAG_RUN_WORKER" = "true" ]; then
 fi
 
 if [ "$BIZRAG_RUN_API" = "true" ]; then
-  exec "$PYTHON_BIN" -m bizrag.entrypoints.retrieve_api \
-    --retriever-config "$BIZRAG_RETRIEVER_CONFIG" \
-    --kb-registry "$BIZRAG_KB_REGISTRY" \
+  exec "$PYTHON_BIN" -m bizrag.entrypoints.api_http \
     --metadata-db "$BIZRAG_METADATA_DB" \
     --workspace-root "$BIZRAG_WORKSPACE_ROOT" \
     --rustfs-token "$BIZRAG_RUSTFS_TOKEN" \

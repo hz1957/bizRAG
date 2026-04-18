@@ -20,9 +20,9 @@
 - `biz_corpus.build_excel_corpus`：支持 Excel 按 sheet / 行转文本
 - `retriever.retriever_init + retriever.retriever_index + retriever.retriever_search`：支持向量建索引与检索
 - `bizrag.api`：承载 HTTP API 应用、路由、schema 和依赖装配
-- `bizrag.entrypoints.retrieve_api`：作为 HTTP 进程入口，负责加载配置并启动 API 应用
-- `bizrag.service.kb_admin`：对外暴露知识库注册、导入、删除、重建等管理命令
-- `bizrag.sdk`：对外暴露本地 pipeline 运行入口
+- `bizrag.entrypoints.api_http`：作为 HTTP 进程入口，负责加载配置并启动 API 应用
+- `bizrag.entrypoints.kb_admin_cli`：对外暴露知识库注册、导入、删除、重建等管理命令
+- `bizrag.service.ultrarag.runner`：作为本地 UltraRAG pipeline 执行适配器
 - `benchmark` / `evaluation`：支持基础离线评测
 - `bizrag.infra.metadata_store`：当前已支持 `SQLite / MySQL` 双后端，默认仍可用本地 `metadata.db`
 - `bizrag.contracts`：沉淀 API、worker、MQ bridge 共用的数据契约
@@ -40,20 +40,13 @@
 
 本轮结构收敛后，当前项目统一采用以下入口：
 
-- Python SDK：`bizrag.sdk`
-- API 进程入口：`bizrag.entrypoints.retrieve_api`
-- Worker 进程入口：`bizrag.entrypoints.rustfs_worker`
-- MQ Bridge 进程入口：`bizrag.entrypoints.rustfs_mq_bridge`
+- API 进程入口：`bizrag.entrypoints.api_http`
+- Worker 进程入口：`bizrag.entrypoints.rustfs_worker_cli`
+- MQ Bridge 进程入口：`bizrag.entrypoints.rustfs_mq_bridge_cli`
 - HTTP 应用实现：`bizrag.api`
-- 管理入口：`bizrag.service.kb_admin`
+- 管理入口：`bizrag.entrypoints.kb_admin_cli`
+- Pipeline 执行适配：`bizrag.service.ultrarag.runner`
 - 底层 server 根路径：`bizrag/servers/<name>`
-
-兼容说明：
-
-- `bizrag.service.rustfs_worker`
-- `bizrag.service.rustfs_mq_bridge`
-
-这两个旧路径仍然保留，但现在只是兼容包装。
 
 不再使用旧的 `bizrag.src.*` 作为公开调用路径。
 
@@ -61,14 +54,15 @@
 
 当前项目采用 `pipeline-first` 约束，目的是避免平台层直接耦合底层处理算子。
 
-- 写链路标准路径：`service -> orchestrator -> sdk -> pipelines -> servers`
+- 写链路标准路径：`service/app -> service/ultrarag -> pipelines -> servers`
 - 适用范围：知识库导入、chunk、索引、删除、重建、评测
 - 约束原则：`service` 不直接编排 `servers`
-- 当前例外：`retrieve/extract` 仍属于在线读链路，可直接走封装服务
+- 在线读链路：`retrieve/extract` 也应通过 pipeline 执行，但入口仍在 `service`
 
 这意味着：
 
 - 平台接入层负责接请求、做鉴权、记任务、管状态
+- `service/app` 负责平台语义，`service/ultrarag` 负责 UltraRAG 调用适配
 - pipeline 层负责把多个原子能力拼成可复用流程
 - server 层只负责单一能力本身，不承载平台业务流程
 
@@ -111,8 +105,7 @@ raw -> corpus -> chunks -> milvus_index -> retrieve
 ```text
 RustFS / Admin API
   -> service
-  -> orchestrator
-  -> sdk
+  -> kb_pipeline
   -> pipelines
   -> servers
   -> Milvus / metadata
@@ -123,7 +116,6 @@ RustFS / Admin API
 - `service` 负责平台语义
 - `pipelines` 负责流程复用
 - `servers` 负责底层原子能力
-- `sdk` 只是 pipeline 调用桥接器，不是平台主入口
 
 ## 3. 统一数据模型
 
@@ -252,7 +244,7 @@ Linux 部署补充：
 本节不仅描述 pipeline 示例，也作为项目内写链路实现规范：
 
 - 新增写链路功能时，优先补 pipeline，而不是在 `service` 中直接 import `servers`
-- `service` 侧只应调用 `orchestrator` 或 `sdk`，不应散落底层 server 细节
+- `service` 侧只应调用 `kb_pipeline` 或 `pipeline_runner`，不应散落底层 server 细节
 
 ### 5.1 文本类入库 Pipeline
 
@@ -414,7 +406,7 @@ POST /api/v1/retrieve
 平台内部逻辑：
 
 ```text
-kb_id -> collection_name
+kb_id -> KB metadata/runtime state
 query -> structured retriever
 filters -> milvus filter
 ret_items -> 业务结构化包装
@@ -423,9 +415,8 @@ ret_items -> 业务结构化包装
 当前启动示例：
 
 ```bash
-python -m bizrag.entrypoints.retrieve_api \
-  --retriever-config bizrag/servers/retriever/parameter.yaml \
-  --kb-registry bizrag/config/kb_registry.yaml
+python -m bizrag.entrypoints.api_http \
+  --metadata-db bizrag/state/metadata.db
 ```
 
 当前服务还同时暴露：
@@ -592,9 +583,9 @@ POST /api/v1/events/rustfs/queue/batch
 - 支持通过 `X-Rustfs-Timestamp` + `X-Rustfs-Signature` 做 HMAC-SHA256 签名校验
 - 所有 RustFS 事件会落到 `rustfs_events` 表，支持查询与重放
 - 批量事件端点可作为消息队列消费者的落地入口，由上游消费者聚合后转发到 BizRAG
-- 当前项目已新增独立 worker：`python -m bizrag.service.rustfs_worker`
+- 当前项目已新增独立 worker：`python -m bizrag.entrypoints.rustfs_worker_cli`
 - 推荐接法是“事件先入队，再由 worker 异步消费”，避免 webhook 长时间阻塞
-- 当前项目已新增 MQ bridge：`python -m bizrag.service.rustfs_mq_bridge`
+- 当前项目已新增 MQ bridge：`python -m bizrag.entrypoints.rustfs_mq_bridge_cli`
 - Kafka / RabbitMQ 推荐作为上游事件总线，bridge 负责把外部消息转存到 SQLite 队列
 
 当前推荐部署链路：
@@ -607,21 +598,21 @@ RustFS -> Kafka / RabbitMQ -> rustfs_mq_bridge -> SQLite rustfs_events -> rustfs
 
 ```bash
 pip install .[mq]
-python -m bizrag.service.rustfs_mq_bridge \
+python -m bizrag.entrypoints.rustfs_mq_bridge_cli \
   --backend kafka \
   --bootstrap-servers localhost:9092 \
   --topic bizrag.rustfs.events
 ```
 
 ```bash
-python -m bizrag.service.rustfs_mq_bridge \
+python -m bizrag.entrypoints.rustfs_mq_bridge_cli \
   --backend rabbitmq \
   --amqp-url amqp://guest:guest@127.0.0.1/ \
   --queue bizrag.rustfs.events
 ```
 
 ```bash
-python -m bizrag.service.rustfs_worker \
+python -m bizrag.entrypoints.rustfs_worker_cli \
   --metadata-db bizrag/state/metadata.db \
   --poll-interval 2 \
   --batch-size 10
@@ -731,24 +722,23 @@ Rust 文档系统建议向 BizAgentPlatform 推送如下事件：
 
 当前实现：
 
-- 已新增 `bizrag.service.kb_admin`
+- 已新增 `bizrag.entrypoints.kb_admin_cli`
 - 已新增可切换的元数据存储层：默认可使用 SQLite `bizrag/state/metadata.db`，Phase 5 可切到 MySQL DSN
 - 已支持 `register-kb`、`ingest-path`、`delete-document`、`rebuild-kb`、`retry-task`
 - 已支持目录扫描、内容 hash 去重、文档级 corpus/chunk 产物、集合级重建
-- 已支持自动同步 `bizrag/config/kb_registry.yaml`
 
 当前命令示例：
 
 ```bash
-python -m bizrag.service.kb_admin \
+python -m bizrag.entrypoints.kb_admin_cli \
   register-kb \
   --kb-id bizrag_bcrp \
-  --retriever-config bizrag/config/retriever_phase1_local.yaml \
+  --retriever-config bizrag/servers/retriever/parameter.local.yaml \
   --source-root raw_knowledge/真实案例
 ```
 
 ```bash
-python -m bizrag.service.kb_admin \
+python -m bizrag.entrypoints.kb_admin_cli \
   ingest-path \
   --kb-id bizrag_bcrp \
   --path raw_knowledge/真实案例/案例1 \
@@ -756,7 +746,7 @@ python -m bizrag.service.kb_admin \
 ```
 
 ```bash
-python -m bizrag.service.kb_admin \
+python -m bizrag.entrypoints.kb_admin_cli \
   delete-document \
   --kb-id bizrag_bcrp \
   --source-uri raw_knowledge/真实案例/案例1/1、MTD&DRF study in Rat-NTSL.xlsx
@@ -893,7 +883,7 @@ Phase 4 当前归属：
 - [docker-compose.yml](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/docker-compose.yml:1)
 - [docker/Dockerfile](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/docker/Dockerfile:1)
 - [docker/start_bizrag.sh](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/docker/start_bizrag.sh:1)
-- [bizrag/config/retriever_docker.yaml](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/bizrag/config/retriever_docker.yaml:1)
+- [bizrag/servers/retriever/parameter.docker.yaml](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/bizrag/servers/retriever/parameter.docker.yaml:1)
 
 说明：
 

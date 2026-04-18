@@ -1,0 +1,10 @@
+benchmark:
+  parameter: bizrag/servers/benchmark/parameter.yaml
+  path: bizrag/servers/benchmark/benchmark.py
+  tools:
+    get_data:
+      input:
+        benchmark: $benchmark
+      output:
+      - q_ls
+      - gt_ls

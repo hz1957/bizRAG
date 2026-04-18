@@ -1,11 +1,16 @@
 # servers/retriever/parameter.yaml
 
 model_name_or_path: openbmb/MiniCPM-Embedding-Light
+retriever_model_name_or_path: openbmb/MiniCPM-Embedding-Light
 corpus_path: data/corpus_example.jsonl
+retriever_corpus_path: data/corpus_example.jsonl
 embedding_path: embedding/embedding.npy
+retriever_embedding_path: embedding/embedding.npy
 collection_name: wiki
+retriever_collection_name: wiki
 
 backend: sentence_transformers # options: infinity, sentence_transformers, openai, bm25
+retriever_backend: sentence_transformers
 backend_configs:
   infinity:
     bettertransformer: false
@@ -24,13 +29,14 @@ backend_configs:
   openai:
     model_name: text-embedding-3-small
     base_url: "https://api.openai.com/v1"
-    api_key: "abc"
+    api_key: ""
     concurrency: 8
   bm25:
     lang: en
     save_path: index/bm25
 
 index_backend: faiss # options: faiss, milvus
+retriever_index_backend: faiss
 index_backend_configs:
   faiss:
     index_use_gpu: True
@@ -77,11 +83,22 @@ websearch_backend_configs:
     search_kwargs: {}
 
 batch_size: 16
+retriever_batch_size: 16
 top_k: 5
+retrieval_top_k: 5
 gpu_ids: "1"
+retriever_gpu_ids: "1"
 query_instruction: ""
 is_multimodal: false
+retriever_is_multimodal: false
 overwrite: false
 retrieve_thread_num: 1
 retriever_url: "http://127.0.0.1:64501"
 is_demo: false
+retriever_is_demo: false
+query_list: []
+filters: {}
+output_fields: []
+filter_expr: ""
+retriever_backend_configs: {}
+retriever_index_backend_configs: {}

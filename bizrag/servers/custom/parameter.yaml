@@ -1,0 +1,12 @@
+query: ""
+top_k: 5
+query_instruction: ""
+filters: {}
+output_fields: []
+retriever_top_k: 5
+retriever_query_instruction: ""
+merge_top_k: 10
+strategy: rrf
+rrf_k: 60
+primary_weight: 1.0
+secondary_weight: 1.0

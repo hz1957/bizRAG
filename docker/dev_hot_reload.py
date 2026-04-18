@@ -52,20 +52,17 @@ def _build_process_commands() -> Dict[str, List[str]]:
         backend = os.environ.get("BIZRAG_MQ_BACKEND", "rabbitmq").strip().lower()
         if backend != "none":
             metadata_db = os.environ.get("BIZRAG_METADATA_DB", str(APP_ROOT / "bizrag" / "state" / "metadata.db"))
-            kb_registry = os.environ.get("BIZRAG_KB_REGISTRY", str(APP_ROOT / "bizrag" / "config" / "kb_registry.yaml"))
             workspace_root = os.environ.get("BIZRAG_WORKSPACE_ROOT", str(APP_ROOT / "runtime" / "kbs"))
             max_events = os.environ.get("BIZRAG_MAX_EVENTS_PER_MESSAGE", "100")
             if backend == "rabbitmq":
                 commands["mq_bridge"] = [
                     PYTHON_BIN,
                     "-m",
-                    "bizrag.service.rustfs_mq_bridge",
+                    "bizrag.entrypoints.rustfs_mq_bridge_cli",
                     "--backend",
                     "rabbitmq",
                     "--metadata-db",
                     metadata_db,
-                    "--kb-registry",
-                    kb_registry,
                     "--workspace-root",
                     workspace_root,
                     "--amqp-url",
@@ -81,13 +78,11 @@ def _build_process_commands() -> Dict[str, List[str]]:
                 commands["mq_bridge"] = [
                     PYTHON_BIN,
                     "-m",
-                    "bizrag.service.rustfs_mq_bridge",
+                    "bizrag.entrypoints.rustfs_mq_bridge_cli",
                     "--backend",
                     "kafka",
                     "--metadata-db",
                     metadata_db,
-                    "--kb-registry",
-                    kb_registry,
                     "--workspace-root",
                     workspace_root,
                     "--bootstrap-servers",
@@ -104,11 +99,9 @@ def _build_process_commands() -> Dict[str, List[str]]:
         commands["worker"] = [
             PYTHON_BIN,
             "-m",
-            "bizrag.service.rustfs_worker",
+            "bizrag.entrypoints.rustfs_worker_cli",
             "--metadata-db",
             os.environ.get("BIZRAG_METADATA_DB", str(APP_ROOT / "bizrag" / "state" / "metadata.db")),
-            "--kb-registry",
-            os.environ.get("BIZRAG_KB_REGISTRY", str(APP_ROOT / "bizrag" / "config" / "kb_registry.yaml")),
             "--workspace-root",
             os.environ.get("BIZRAG_WORKSPACE_ROOT", str(APP_ROOT / "runtime" / "kbs")),
             "--poll-interval",
@@ -121,11 +114,7 @@ def _build_process_commands() -> Dict[str, List[str]]:
         commands["api"] = [
             PYTHON_BIN,
             "-m",
-            "bizrag.entrypoints.retrieve_api",
-            "--retriever-config",
-            os.environ.get("BIZRAG_RETRIEVER_CONFIG", str(APP_ROOT / "bizrag" / "config" / "retriever_docker.yaml")),
-            "--kb-registry",
-            os.environ.get("BIZRAG_KB_REGISTRY", str(APP_ROOT / "bizrag" / "config" / "kb_registry.yaml")),
+            "bizrag.entrypoints.api_http",
             "--metadata-db",
             os.environ.get("BIZRAG_METADATA_DB", str(APP_ROOT / "bizrag" / "state" / "metadata.db")),
             "--workspace-root",

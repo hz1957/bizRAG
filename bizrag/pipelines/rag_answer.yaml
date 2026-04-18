@@ -1,0 +1,31 @@
+servers:
+  custom: bizrag/servers/custom
+  custom_post: bizrag/servers/custom
+  dense: bizrag/servers/retriever
+  sparse: bizrag/servers/retriever
+  merge: bizrag/servers/custom
+  reranker: bizrag/servers/reranker
+  prompt_builder: bizrag/servers/prompt
+  generation: bizrag/servers/generation
+
+pipeline:
+- custom.build_classic_read_inputs
+- dense.retriever_init
+- sparse.retriever_init
+- dense.retriever_search_structured:
+    output:
+      ret_items: ret_items
+- sparse.bm25_search_structured:
+    output:
+      ret_items: temp_items
+- merge.merge_retrieve_items:
+    input:
+      ret_items: ret_items
+      temp_items: temp_items
+- reranker.reranker_init
+- reranker.reranker_rerank_items
+- custom_post.retrieve_items_to_passages
+- prompt_builder.qa_rag_boxed
+- generation.generation_init
+- generation.generate
+- custom_post.output_extract_from_boxed

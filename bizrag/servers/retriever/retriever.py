@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -22,6 +23,18 @@ except ImportError:
     from websearch_backends import create_websearch_backend
 
 app = UltraRAG_MCP_Server("retriever")
+
+DEFAULT_STRUCTURED_OUTPUT_FIELDS = [
+    "doc_id",
+    "title",
+    "file_name",
+    "source_type",
+    "sheet_name",
+    "row_index",
+    "kb_id",
+    "doc_version",
+    "source_uri",
+]
 
 
 class Retriever:
@@ -51,6 +64,10 @@ class Retriever:
             output="q_ls,top_k,query_instruction,collection_name->ret_psg",
         )
         mcp_inst.tool(
+            self.retriever_search_structured,
+            output="query_list,top_k,query_instruction,collection_name,filters,output_fields->ret_items",
+        )
+        mcp_inst.tool(
             self.retriever_batch_search,
             output="batch_query_list,top_k,query_instruction,collection_name->ret_psg_ls",
         )
@@ -61,6 +78,10 @@ class Retriever:
         mcp_inst.tool(
             self.bm25_search,
             output="q_ls,top_k->ret_psg",
+        )
+        mcp_inst.tool(
+            self.bm25_search_structured,
+            output="query_list,top_k,filters,output_fields->ret_items",
         )
         mcp_inst.tool(
             self.retriever_deploy_search,
@@ -86,6 +107,180 @@ class Retriever:
             Filtered dictionary
         """
         return {k: v for k, v in (d or {}).items() if k not in banned and v is not None}
+
+    @staticmethod
+    def _resolve_output_fields(output_fields: Optional[List[str]]) -> List[str]:
+        fields = list(output_fields or DEFAULT_STRUCTURED_OUTPUT_FIELDS)
+        deduped: List[str] = []
+        for field in fields:
+            if field not in deduped:
+                deduped.append(field)
+        return deduped
+
+    @staticmethod
+    def _normalize_query_list(query_list: Any) -> List[str]:
+        if isinstance(query_list, str):
+            queries = [query_list]
+        else:
+            queries = [str(query) for query in list(query_list or [])]
+
+        if not queries:
+            raise ValidationError("[retriever] query_list must not be empty")
+
+        blank_indexes = [
+            index for index, query in enumerate(queries) if not str(query).strip()
+        ]
+        if blank_indexes:
+            raise ValidationError(
+                f"[retriever] query_list contains blank query at indexes: {blank_indexes}"
+            )
+
+        return queries
+
+    @staticmethod
+    def _record_matches_filters(
+        record: Dict[str, Any],
+        filters: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not filters:
+            return True
+
+        for field, raw_value in filters.items():
+            if raw_value in (None, ""):
+                continue
+            values = raw_value if isinstance(raw_value, list) else [raw_value]
+            values = [value for value in values if value not in (None, "")]
+            if values and record.get(field) not in values:
+                return False
+        return True
+
+    def _bm25_weight_mask(
+        self,
+        filters: Optional[Dict[str, Any]],
+    ) -> Optional[np.ndarray]:
+        if not filters:
+            return None
+        return np.asarray(
+            [
+                1.0 if self._record_matches_filters(record, filters) else 0.0
+                for record in self.corpus_records
+            ],
+            dtype=np.float32,
+        )
+
+    def _create_bm25_components(self) -> tuple[Any, Any, Dict[str, Any]]:
+        try:
+            import bm25s
+        except ImportError:
+            err_msg = (
+                "bm25s is not installed. "
+                "Please install it with `pip install bm25s`."
+            )
+            app.logger.error(err_msg)
+            raise ImportError(err_msg)
+
+        try:
+            model = bm25s.BM25(backend="numba")
+        except Exception as e:
+            warn_msg = (
+                f"Failed to initialize BM25 model with backend 'numba': {e}. "
+                "Falling back to 'numpy' backend."
+            )
+            app.logger.warning(warn_msg)
+            model = bm25s.BM25(backend="numpy")
+
+        cfg = (self.backend_configs.get("bm25", {}) or {}).copy()
+        lang = cfg.get("lang", "en")
+        try:
+            tokenizer = bm25s.tokenization.Tokenizer(stopwords=lang)
+        except Exception as e:
+            err_msg = f"Failed to initialize BM25 tokenizer for language '{lang}': {e}"
+            app.logger.error(err_msg)
+            raise RuntimeError(err_msg)
+
+        return model, tokenizer, cfg
+
+    def _load_bm25_index(
+        self,
+        *,
+        model: Any,
+        tokenizer: Any,
+        bm25_save_path: str,
+    ) -> Any:
+        try:
+            loaded_model = model.load(bm25_save_path, mmap=True, load_corpus=False)
+        except ImportError as exc:
+            warn_msg = (
+                "[bm25] Failed to load index with saved backend. "
+                f"Falling back to numpy backend: {exc}"
+            )
+            app.logger.warning(warn_msg)
+            loaded_model = model.load(
+                bm25_save_path,
+                mmap=True,
+                load_corpus=False,
+                override_params={"backend": "numpy"},
+            )
+        tokenizer.load_stopwords(bm25_save_path)
+        tokenizer.load_vocab(bm25_save_path)
+        loaded_model.corpus = self.contents
+        loaded_model.backend = getattr(loaded_model, "backend", "numpy")
+        return loaded_model
+
+    def _ensure_bm25_state(self) -> tuple[Any, Any, Dict[str, Any]]:
+        if hasattr(self, "_bm25_model") and hasattr(self, "_bm25_tokenizer"):
+            return self._bm25_model, self._bm25_tokenizer, self._bm25_cfg
+
+        if self.backend == "bm25" and hasattr(self, "model") and hasattr(self, "tokenizer"):
+            self._bm25_model = self.model
+            self._bm25_tokenizer = self.tokenizer
+            self._bm25_cfg = self.cfg
+        else:
+            self._bm25_model, self._bm25_tokenizer, self._bm25_cfg = (
+                self._create_bm25_components()
+            )
+
+        bm25_save_path = self._bm25_cfg.get("save_path")
+        if bm25_save_path and os.path.exists(bm25_save_path):
+            self._bm25_model = self._load_bm25_index(
+                model=self._bm25_model,
+                tokenizer=self._bm25_tokenizer,
+                bm25_save_path=bm25_save_path,
+            )
+
+        return self._bm25_model, self._bm25_tokenizer, self._bm25_cfg
+
+    @staticmethod
+    def _require_bm25_index_path(bm25_cfg: Dict[str, Any]) -> str:
+        bm25_save_path = str(bm25_cfg.get("save_path") or "").strip()
+        if not bm25_save_path:
+            raise NotFoundError(
+                "[bm25] save_path is not configured. Run bm25_index after configuring backend_configs.bm25.save_path."
+            )
+        if not os.path.exists(bm25_save_path):
+            raise NotFoundError(
+                f"[bm25] index not found at {bm25_save_path}. Run bm25_index before bm25_search."
+            )
+        return bm25_save_path
+
+    @staticmethod
+    def _build_structured_hit(
+        record: Dict[str, Any],
+        *,
+        score: float,
+        output_fields: List[str],
+    ) -> Dict[str, Any]:
+        item: Dict[str, Any] = {
+            "content": str(record.get("contents") or record.get("content") or ""),
+            "score": float(score),
+        }
+        for field in output_fields:
+            if field in {"content", "contents"}:
+                continue
+            value = record.get(field)
+            if value is not None:
+                item[field] = value
+        return item
 
     async def _openai_embed_texts(
         self,
@@ -361,34 +556,10 @@ class Retriever:
                 app.logger.error(err_msg)
                 raise RuntimeError(err_msg) from e
         elif self.backend == "bm25":
-            try:
-                import bm25s
-            except ImportError:
-                err_msg = (
-                    "bm25s is not installed. "
-                    "Please install it with `pip install bm25s`."
-                )
-                app.logger.error(err_msg)
-                raise ImportError(err_msg)
-
-            try:
-                self.model = bm25s.BM25(backend="numba")
-            except Exception as e:
-                warn_msg = (
-                    f"Failed to initialize BM25 model with backend 'numba': {e}. "
-                    "Falling back to 'numpy' backend."
-                )
-                app.logger.warning(warn_msg)
-                self.model = bm25s.BM25(backend="numpy")
-            lang = self.cfg.get("lang", "en")
-            try:
-                self.tokenizer = bm25s.tokenization.Tokenizer(stopwords=lang)
-            except Exception as e:
-                err_msg = (
-                    f"Failed to initialize BM25 tokenizer for language '{lang}': {e}"
-                )
-                app.logger.error(err_msg)
-                raise RuntimeError(err_msg)
+            self.model, self.tokenizer, self.cfg = self._create_bm25_components()
+            self._bm25_model = self.model
+            self._bm25_tokenizer = self.tokenizer
+            self._bm25_cfg = self.cfg
         else:
             error_msg = (
                 f"Unsupported backend: {backend}. "
@@ -486,20 +657,24 @@ class Retriever:
         elif self.backend == "bm25":
             bm25_save_path = self.cfg.get("save_path", None)
             if bm25_save_path and os.path.exists(bm25_save_path):
-                self.model = self.model.load(
-                    bm25_save_path, mmap=True, load_corpus=False
+                self.model = self._load_bm25_index(
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    bm25_save_path=bm25_save_path,
                 )
-                self.tokenizer.load_stopwords(bm25_save_path)
-                self.tokenizer.load_vocab(bm25_save_path)
-                self.model.corpus = self.contents
-                self.model.backend = "numba"
+                self._bm25_model = self.model
+                self._bm25_tokenizer = self.tokenizer
+                self._bm25_cfg = self.cfg
                 info_msg = "[bm25] Index loaded successfully."
                 app.logger.info(info_msg)
             else:
                 if bm25_save_path and not os.path.exists(bm25_save_path):
-                    warn_msg = f"{bm25_save_path} does not exist."
-                    app.logger.warning(warn_msg)
-                info_msg = "[bm25] no index_path provided. Retriever initialized without index."
+                    app.logger.info(
+                        "[bm25] Index path does not exist yet: %s. "
+                        "Retriever initialized without index; run bm25_index before bm25_search.",
+                        bm25_save_path,
+                    )
+                info_msg = "[bm25] Retriever initialized without index."
                 app.logger.info(info_msg)
 
     async def retriever_embed(
@@ -932,9 +1107,8 @@ class Retriever:
         query_list: List[str],
         query_instruction: str = "",
     ) -> np.ndarray:
-        if isinstance(query_list, str):
-            query_list = [query_list]
-        queries = [f"{query_instruction}{query}" for query in query_list]
+        normalized_queries = self._normalize_query_list(query_list)
+        queries = [f"{query_instruction}{query}" for query in normalized_queries]
 
         query_embedding = None
 
@@ -1006,7 +1180,11 @@ class Retriever:
             app.logger.error(error_msg)
             raise ValueError(error_msg)
 
-        query_embedding = np.array(query_embedding, dtype=np.float32)
+        query_embedding = np.asarray(query_embedding, dtype=np.float32)
+        if query_embedding.ndim == 1:
+            query_embedding = query_embedding.reshape(1, -1)
+        elif query_embedding.ndim == 0:
+            raise RuntimeError("Query embedding generation failed: empty embedding")
 
         if not getattr(self, "is_demo", False):
             info_msg = f"query embedding shape: {query_embedding.shape}"
@@ -1030,6 +1208,8 @@ class Retriever:
             )
             app.logger.error(err_msg)
             raise RuntimeError(err_msg)
+
+        self._normalize_query_list(query_list)
 
         query_embedding = await self._encode_queries(
             query_list=query_list,
@@ -1072,6 +1252,7 @@ class Retriever:
             app.logger.info(
                 f"[Demo] Searching query in collection: '{target_collection}'"
             )
+        self._normalize_query_list(query_list)
         query_embedding = await self._encode_queries(
             query_list=query_list,
             query_instruction=query_instruction,
@@ -1201,7 +1382,8 @@ class Retriever:
         Args:
             overwrite: Whether to overwrite existing index
         """
-        bm25_save_path = self.cfg.get("save_path", None)
+        model, tokenizer, bm25_cfg = self._ensure_bm25_state()
+        bm25_save_path = bm25_cfg.get("save_path", None)
         if bm25_save_path:
             output_dir = os.path.dirname(bm25_save_path)
         else:
@@ -1210,22 +1392,33 @@ class Retriever:
             output_dir = os.path.join(project_root, "output", "index")
             bm25_save_path = os.path.join(output_dir, "bm25")
 
-        if not overwrite and os.path.exists(bm25_save_path):
-            info_msg = (
-                f"Index file already exists: {bm25_save_path}. "
-                "Set overwrite=True to overwrite."
-            )
-            app.logger.info(info_msg)
-            return
+        if os.path.exists(bm25_save_path):
+            corpus_mtime = 0.0
+            if getattr(self, "corpus_path", "") and os.path.exists(self.corpus_path):
+                corpus_mtime = os.path.getmtime(self.corpus_path)
 
-        if overwrite and os.path.exists(bm25_save_path):
-            os.remove(bm25_save_path)
+            if not overwrite and os.path.getmtime(bm25_save_path) >= corpus_mtime:
+                info_msg = (
+                    f"BM25 index is up to date: {bm25_save_path}. "
+                    "Skip rebuilding."
+                )
+                app.logger.info(info_msg)
+                return
 
-        corpus_tokens = self.tokenizer.tokenize(self.contents, return_as="tuple")
-        self.model.index(corpus_tokens)
-        self.model.save(bm25_save_path, corpus=None)
-        self.tokenizer.save_stopwords(bm25_save_path)
-        self.tokenizer.save_vocab(bm25_save_path)
+        if os.path.exists(bm25_save_path):
+            if os.path.isdir(bm25_save_path):
+                shutil.rmtree(bm25_save_path)
+            else:
+                os.remove(bm25_save_path)
+
+        corpus_tokens = tokenizer.tokenize(self.contents, return_as="tuple")
+        model.index(corpus_tokens)
+        model.save(bm25_save_path, corpus=None)
+        tokenizer.save_stopwords(bm25_save_path)
+        tokenizer.save_vocab(bm25_save_path)
+        self._bm25_model = model
+        self._bm25_tokenizer = tokenizer
+        self._bm25_cfg = bm25_cfg
         info_msg = "[bm25] Indexing success."
         app.logger.info(info_msg)
 
@@ -1243,16 +1436,74 @@ class Retriever:
         Returns:
             Dictionary with 'ret_psg' containing retrieved passages
         """
+        model, tokenizer, bm25_cfg = self._ensure_bm25_state()
+        self._require_bm25_index_path(bm25_cfg)
+        normalized_queries = self._normalize_query_list(query_list)
         results = []
-        q_toks = self.tokenizer.tokenize(
-            query_list,
+        q_toks = tokenizer.tokenize(
+            normalized_queries,
             return_as="tuple",
             update_vocab=False,
         )
-        results, scores = self.model.retrieve(q_toks, k=top_k)
+        results, scores = model.retrieve(q_toks, k=top_k)
         results = results.tolist() if isinstance(results, np.ndarray) else results
         scores = scores.tolist() if isinstance(scores, np.ndarray) else scores
         return {"ret_psg": results}
+
+    async def bm25_search_structured(
+        self,
+        query_list: List[str],
+        top_k: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+        output_fields: Optional[List[str]] = None,
+    ) -> Dict[str, List[List[Dict[str, Any]]]]:
+        model, tokenizer, bm25_cfg = self._ensure_bm25_state()
+        self._require_bm25_index_path(bm25_cfg)
+        normalized_queries = self._normalize_query_list(query_list)
+        if not self.corpus_records:
+            return {"ret_items": [[] for _ in normalized_queries]}
+
+        effective_top_k = max(0, min(int(top_k), len(self.corpus_records)))
+        if effective_top_k == 0:
+            return {"ret_items": [[] for _ in normalized_queries]}
+
+        q_toks = tokenizer.tokenize(
+            normalized_queries,
+            return_as="tuple",
+            update_vocab=False,
+        )
+        doc_indices = np.arange(len(self.corpus_records))
+        results, scores = model.retrieve(
+            q_toks,
+            corpus=doc_indices,
+            k=effective_top_k,
+            return_as="tuple",
+            show_progress=False,
+            weight_mask=self._bm25_weight_mask(filters),
+        )
+        results = results.tolist() if isinstance(results, np.ndarray) else results
+        scores = scores.tolist() if isinstance(scores, np.ndarray) else scores
+
+        resolved_output_fields = self._resolve_output_fields(output_fields)
+        rows: List[List[Dict[str, Any]]] = []
+        for row_indices, row_scores in zip(results, scores):
+            row: List[Dict[str, Any]] = []
+            for idx, score in zip(row_indices, row_scores):
+                doc_idx = int(idx)
+                if doc_idx < 0 or doc_idx >= len(self.corpus_records):
+                    continue
+                record = self.corpus_records[doc_idx]
+                if not self._record_matches_filters(record, filters):
+                    continue
+                row.append(
+                    self._build_structured_hit(
+                        record,
+                        score=float(score),
+                        output_fields=resolved_output_fields,
+                    )
+                )
+            rows.append(row)
+        return {"ret_items": rows}
 
     async def retriever_websearch(
         self,

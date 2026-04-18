@@ -1,0 +1,10 @@
+biz_corpus:
+  parameter: bizrag/servers/biz_corpus/parameter.yaml
+  path: bizrag/servers/biz_corpus/biz_corpus.py
+  tools:
+    build_excel_corpus:
+      input:
+        parse_file_path: $parse_file_path
+        text_corpus_save_path: $text_corpus_save_path
+        sheet_mode: $sheet_mode
+        include_header: $include_header

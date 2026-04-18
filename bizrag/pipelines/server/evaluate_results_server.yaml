@@ -1,0 +1,22 @@
+benchmark:
+  parameter: bizrag/servers/benchmark/parameter.yaml
+  path: bizrag/servers/benchmark/benchmark.py
+  tools:
+    get_data:
+      input:
+        benchmark: $benchmark
+      output:
+      - q_ls
+      - gt_ls
+evaluation:
+  parameter: bizrag/servers/evaluation/parameter.yaml
+  path: bizrag/servers/evaluation/evaluation.py
+  tools:
+    evaluate:
+      input:
+        pred_ls: null
+        gt_ls: null
+        metrics: $metrics
+        save_path: $save_path
+      output:
+      - eval_res

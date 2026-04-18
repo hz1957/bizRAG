@@ -1,0 +1,26 @@
+parameter: bizrag/servers/reranker/parameter.yaml
+path: bizrag/servers/reranker/reranker.py
+tools:
+  reranker_init:
+    input:
+      model_name_or_path: $model_name_or_path
+      backend_configs: $backend_configs
+      batch_size: $batch_size
+      gpu_ids: $gpu_ids
+      backend: $backend
+  reranker_rerank:
+    input:
+      query_list: $query_list
+      passages_list: $passages_list
+      top_k: $top_k
+      query_instruction: $query_instruction
+    output:
+    - rerank_psg
+  reranker_rerank_items:
+    input:
+      query_list: $query_list
+      ret_items: $ret_items
+      top_k: $top_k
+      query_instruction: $query_instruction
+    output:
+    - ret_items

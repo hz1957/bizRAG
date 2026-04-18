@@ -1,0 +1,15 @@
+evaluation:
+  parameter: bizrag/servers/evaluation/parameter.yaml
+  path: bizrag/servers/evaluation/evaluation.py
+  tools:
+    evaluate_trec_pvalue:
+      input:
+        run_new_path: $run_new_path
+        run_old_path: $run_old_path
+        qrels_path: $qrels_path
+        metrics: $ir_metrics
+        ks: $ks
+        n_resamples: $n_resamples
+        save_path: $save_path
+      output:
+      - eval_res

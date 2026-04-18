@@ -3,6 +3,8 @@ __pycache__/
 .DS_Store
 *.egg-info/
 .venv/
+build/
+dist/
 
 # Legacy old data dirs
 data/corpus/

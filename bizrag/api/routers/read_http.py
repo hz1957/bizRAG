@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+from typing import Any, Dict
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+
+from bizrag.api.deps import get_read_service
+from bizrag.contracts.schemas import (
+    ExtractFieldResult,
+    ExtractRequest,
+    ExtractResponse,
+    RAGRequest,
+    RAGResponse,
+    RetrieveItem,
+    RetrieveRequest,
+    RetrieveResponse,
+)
+from bizrag.common.errors import ServiceError
+from bizrag.service.app.extract_engine import extract_fields
+
+
+router = APIRouter()
+
+
+def _model_to_dict(item: BaseModel) -> Dict[str, Any]:
+    if hasattr(item, "model_dump"):
+        return item.model_dump()
+    return item.dict()
+
+
+@router.get("/healthz")
+async def healthz(request: Request) -> Dict[str, str]:
+    read_service = get_read_service(request)
+    return {
+        "status": "ok",
+        "retriever": read_service.health_status(),
+    }
+
+
+@router.post("/api/v1/retrieve", response_model=RetrieveResponse)
+async def retrieve(req: RetrieveRequest, request: Request) -> RetrieveResponse:
+    read_service = get_read_service(request)
+    try:
+        items = await read_service.retrieve_items(
+            kb_id=req.kb_id,
+            query=req.query,
+            top_k=req.top_k,
+            query_instruction=req.query_instruction,
+            filters=req.filters,
+        )
+        return RetrieveResponse(items=items)
+    except ServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/api/v1/rag", response_model=RAGResponse)
+async def rag(req: RAGRequest, request: Request) -> RAGResponse:
+    read_service = get_read_service(request)
+    try:
+        result = await read_service.generate_answer(
+            kb_id=req.kb_id,
+            query=req.query,
+            top_k=req.top_k,
+            query_instruction=req.query_instruction,
+            filters=req.filters,
+            system_prompt=req.system_prompt,
+        )
+        return RAGResponse(**result)
+    except ServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/api/v1/extract", response_model=ExtractResponse)
+async def extract(req: ExtractRequest, request: Request) -> ExtractResponse:
+    read_service = get_read_service(request)
+    try:
+        evidence_items = await read_service.retrieve_items(
+            kb_id=req.kb_id,
+            query=req.query,
+            top_k=req.top_k,
+            query_instruction=req.query_instruction,
+            filters=req.filters,
+        )
+        extraction = extract_fields(
+            fields=[_model_to_dict(field) for field in req.fields],
+            evidence_items=[_model_to_dict(item) for item in evidence_items],
+            max_evidence_per_field=req.max_evidence_per_field,
+        )
+        field_results = [
+            ExtractFieldResult(
+                name=str(item["name"]),
+                value=item.get("value"),
+                raw_value=item.get("raw_value"),
+                status=str(item.get("status") or "missing"),
+                confidence=float(item.get("confidence") or 0.0),
+                reason=str(item.get("reason") or ""),
+                evidence=[RetrieveItem(**evidence) for evidence in item.get("evidence", [])],
+            )
+            for item in extraction["field_results"]
+        ]
+        citations = [RetrieveItem(**item) for item in extraction["citations"]]
+        return ExtractResponse(
+            result=extraction["result"],
+            field_results=field_results,
+            citations=citations,
+            status=str(extraction["status"]),
+            missing_required_fields=list(extraction.get("missing_required_fields", [])),
+        )
+    except ServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

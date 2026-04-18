@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
-from bizrag.service.io_utils import utc_now
+from bizrag.common.time_utils import utc_now
 
 
 @dataclass

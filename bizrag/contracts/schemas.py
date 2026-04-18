@@ -45,6 +45,21 @@ class RetrieveResponse(BaseModel):
     items: List[RetrieveItem]
 
 
+class RAGRequest(BaseModel):
+    kb_id: str
+    query: str
+    top_k: int = 5
+    query_instruction: str = ""
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    system_prompt: str = ""
+
+
+class RAGResponse(BaseModel):
+    answer: str
+    raw_answer: str = ""
+    citations: List[RetrieveItem] = Field(default_factory=list)
+
+
 class ExtractFieldSpec(BaseModel):
     name: str
     description: str = ""

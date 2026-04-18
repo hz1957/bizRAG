@@ -1,0 +1,3 @@
+q_ls: []
+ret_psg: []
+template: bizrag/prompt/qa_rag_boxed.jinja

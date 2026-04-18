@@ -5,103 +5,116 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
-from bizrag.service.kb_admin import KBAdmin
-from bizrag.service.kb_registry import KBRegistry
-from bizrag.service.retrieval_service import RetrievalService
+from bizrag.service.app.kb_admin import KBAdmin
+from bizrag.service.ultrarag.read_service import ReadService
 
 
 @dataclass
 class ApiRuntimeConfig:
-    retriever_cfg: Optional[Dict[str, Any]] = None
-    kb_registry: Optional[KBRegistry] = None
     metadata_db_path: str = "bizrag/state/metadata.db"
     workspace_root: str = "runtime/kbs"
     rustfs_token: str = ""
     rustfs_shared_secret: str = ""
 
 
-_runtime_config = ApiRuntimeConfig()
-_kb_admin: Optional[KBAdmin] = None
-_retrieval_service: Optional[RetrievalService] = None
+@dataclass
+class ApiServices:
+    admin: Optional[KBAdmin] = None
+    read_service: Optional[ReadService] = None
+
+
+STATE_RUNTIME_CONFIG = "bizrag_runtime_config"
+STATE_SERVICES = "bizrag_services"
 
 
 def configure_api(
     *,
-    retriever_cfg: Dict[str, Any],
-    kb_registry: KBRegistry,
+    app: FastAPI,
     metadata_db_path: str,
     workspace_root: str,
     rustfs_token: str = "",
     rustfs_shared_secret: str = "",
 ) -> None:
-    _runtime_config.retriever_cfg = retriever_cfg
-    _runtime_config.kb_registry = kb_registry
-    _runtime_config.metadata_db_path = metadata_db_path
-    _runtime_config.workspace_root = workspace_root
-    _runtime_config.rustfs_token = rustfs_token
-    _runtime_config.rustfs_shared_secret = rustfs_shared_secret
+    setattr(
+        app.state,
+        STATE_RUNTIME_CONFIG,
+        ApiRuntimeConfig(
+            metadata_db_path=metadata_db_path,
+            workspace_root=workspace_root,
+            rustfs_token=rustfs_token,
+            rustfs_shared_secret=rustfs_shared_secret,
+        ),
+    )
 
 
-def get_runtime_config() -> ApiRuntimeConfig:
-    return _runtime_config
+def _get_runtime_config_from_app(app: FastAPI) -> ApiRuntimeConfig:
+    config = getattr(app.state, STATE_RUNTIME_CONFIG, None)
+    if config is None:
+        raise RuntimeError("API runtime config is not set")
+    return config
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    global _kb_admin, _retrieval_service
-
-    if _runtime_config.retriever_cfg is None:
-        raise RuntimeError("retriever_cfg is not set")
-    if _runtime_config.kb_registry is None:
-        raise RuntimeError("kb_registry is not set")
-
-    _kb_admin = KBAdmin(
-        metadata_db=_runtime_config.metadata_db_path,
-        kb_registry_path=_runtime_config.kb_registry.path,
-        workspace_root=_runtime_config.workspace_root,
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    config = _get_runtime_config_from_app(app)
+    services = ApiServices(
+        admin=KBAdmin(
+            metadata_db=config.metadata_db_path,
+            workspace_root=config.workspace_root,
+        ),
+        read_service=ReadService(
+            metadata_db=config.metadata_db_path,
+        ),
     )
-    _retrieval_service = RetrievalService(
-        retriever_cfg=_runtime_config.retriever_cfg,
-        kb_registry=_runtime_config.kb_registry,
-    )
+    setattr(app.state, STATE_SERVICES, services)
     try:
         yield
     finally:
-        if _kb_admin is not None:
-            _kb_admin.close()
-            _kb_admin = None
-        if _retrieval_service is not None:
-            _retrieval_service.reset()
-            _retrieval_service = None
+        if services.admin is not None:
+            services.admin.close()
+        if services.read_service is not None:
+            services.read_service.reset()
+        setattr(app.state, STATE_SERVICES, ApiServices())
 
 
-def require_admin() -> KBAdmin:
-    if _kb_admin is None:
+def _get_services(request: Request) -> ApiServices:
+    services = getattr(request.app.state, STATE_SERVICES, None)
+    if services is None:
+        raise HTTPException(status_code=503, detail="API services are not initialized")
+    return services
+
+
+def get_runtime_config(request: Request) -> ApiRuntimeConfig:
+    return _get_runtime_config_from_app(request.app)
+
+
+def require_admin(request: Request) -> KBAdmin:
+    admin = _get_services(request).admin
+    if admin is None:
         raise HTTPException(status_code=503, detail="KB admin is not initialized")
-    return _kb_admin
+    return admin
 
 
-def get_retrieval_service() -> RetrievalService:
-    if _retrieval_service is None:
-        raise HTTPException(status_code=503, detail="Retriever service is not initialized")
-    return _retrieval_service
+def get_read_service(request: Request) -> ReadService:
+    read_service = _get_services(request).read_service
+    if read_service is None:
+        raise HTTPException(status_code=503, detail="Read service is not initialized")
+    return read_service
 
 
-def _new_admin_instance() -> KBAdmin:
-    if _runtime_config.kb_registry is None:
-        raise HTTPException(status_code=503, detail="KB registry is not initialized")
+def _new_admin_instance(app: FastAPI) -> KBAdmin:
+    config = _get_runtime_config_from_app(app)
     return KBAdmin(
-        metadata_db=_runtime_config.metadata_db_path,
-        kb_registry_path=_runtime_config.kb_registry.path,
-        workspace_root=_runtime_config.workspace_root,
+        metadata_db=config.metadata_db_path,
+        workspace_root=config.workspace_root,
     )
 
 
-async def run_admin_async(method_name: str, **kwargs: Any) -> Any:
+async def run_admin_async(request: Request, method_name: str, **kwargs: Any) -> Any:
     def _runner() -> Any:
-        admin = _new_admin_instance()
+        admin = _new_admin_instance(request.app)
         try:
             method = getattr(admin, method_name)
             return asyncio.run(method(**kwargs))

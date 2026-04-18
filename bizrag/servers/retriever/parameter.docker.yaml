@@ -1,0 +1,21 @@
+retriever:
+  model_name_or_path: models--BAAI--bge-large-zh-v1.5
+  index_backend: milvus
+  batch_size: 8
+  gpu_ids: null
+  backend_configs:
+    sentence_transformers:
+      sentence_transformers_encode:
+        encode_chunk_size: 128
+  index_backend_configs:
+    milvus:
+      uri: http://milvus:19530
+      id_max_length: 128
+
+reranker:
+  model_name_or_path: models--BAAI--bge-reranker-large
+  batch_size: 8
+  gpu_ids: null
+  backend_configs:
+    sentence_transformers:
+      device: cpu

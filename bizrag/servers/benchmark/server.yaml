@@ -4,4 +4,6 @@ tools:
   get_data:
     input:
       benchmark: $benchmark
-
+    output:
+    - q_ls
+    - gt_ls

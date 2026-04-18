@@ -77,30 +77,27 @@ echo "Waiting for RabbitMQ at $RABBITMQ_HOST:$RABBITMQ_PORT ..."
 RABBITMQ_HOST="$RABBITMQ_HOST" RABBITMQ_PORT="$RABBITMQ_PORT" WAIT_TIMEOUT_SECONDS="$WAIT_TIMEOUT_SECONDS" wait_for_rabbitmq
 
 echo "Registering temporary KB..."
-"$PYTHON_BIN" -m bizrag.service.kb_admin \
+"$PYTHON_BIN" -m bizrag.entrypoints.kb_admin_cli \
   --metadata-db "$TMP_ROOT/metadata.db" \
-  --kb-registry "$TMP_ROOT/kb_registry.yaml" \
   --workspace-root "$TMP_ROOT/runtime" \
   register-kb \
   --kb-id mq_e2e \
-  --retriever-config "$ROOT_DIR/bizrag/config/retriever_phase1_local.yaml" \
+  --retriever-config "$ROOT_DIR/bizrag/servers/retriever/parameter.local.yaml" \
   --collection-name mq_e2e \
   --index-uri "$TMP_ROOT/runtime/mq_e2e/index/milvus_lite.db" >/dev/null
 
 echo "Starting MQ bridge..."
-"$PYTHON_BIN" -m bizrag.service.rustfs_mq_bridge \
+"$PYTHON_BIN" -m bizrag.entrypoints.rustfs_mq_bridge_cli \
   --backend rabbitmq \
   --metadata-db "$TMP_ROOT/metadata.db" \
-  --kb-registry "$TMP_ROOT/kb_registry.yaml" \
   --workspace-root "$TMP_ROOT/runtime" \
   --queue "$QUEUE_NAME" \
   --amqp-url "$AMQP_URL" >"$TMP_ROOT/bridge.log" 2>&1 &
 bridge_pid=$!
 
 echo "Starting worker..."
-"$PYTHON_BIN" -m bizrag.service.rustfs_worker \
+"$PYTHON_BIN" -m bizrag.entrypoints.rustfs_worker_cli \
   --metadata-db "$TMP_ROOT/metadata.db" \
-  --kb-registry "$TMP_ROOT/kb_registry.yaml" \
   --workspace-root "$TMP_ROOT/runtime" \
   --poll-interval 1 \
   --batch-size 10 >"$TMP_ROOT/worker.log" 2>&1 &
@@ -171,38 +168,24 @@ echo "Running retrieval verification..."
 TMP_ROOT="$TMP_ROOT" "$PYTHON_BIN" - <<'PY'
 import asyncio
 import os
-import yaml
 
-from bizrag.servers.retriever.retriever import Retriever, app
-
-cfg_path = os.path.join(os.environ["TMP_ROOT"], "runtime", "mq_e2e", "index", "retriever_runtime.yaml")
-with open(cfg_path, "r", encoding="utf-8") as f:
-    cfg = yaml.safe_load(f)
+from bizrag.service.ultrarag.read_service import ReadService
 
 async def main() -> None:
-    retriever = Retriever(app)
-    await retriever.retriever_init(
-        model_name_or_path=cfg["model_name_or_path"],
-        backend_configs=cfg["backend_configs"],
-        batch_size=cfg.get("batch_size", 32),
-        corpus_path=cfg.get("corpus_path", ""),
-        gpu_ids=cfg.get("gpu_ids"),
-        is_multimodal=cfg.get("is_multimodal", False),
-        backend=cfg.get("backend", "sentence_transformers"),
-        index_backend=cfg.get("index_backend", "milvus"),
-        index_backend_configs=cfg.get("index_backend_configs", {}),
-        is_demo=cfg.get("is_demo", False),
-        collection_name=cfg.get("collection_name", "mq_e2e"),
+    read_service = ReadService(
+        metadata_db=os.path.join(os.environ["TMP_ROOT"], "metadata.db"),
     )
-    result = await retriever.retriever_search_structured(
-        query_list=["12345"],
-        top_k=1,
-        query_instruction="",
-        collection_name="mq_e2e",
-        filters=None,
-        output_fields=["doc_id", "file_name", "source_uri", "doc_version"],
-    )
-    print(result["ret_items"][0][0])
+    try:
+        items = await read_service.retrieve_items(
+            kb_id="mq_e2e",
+            query="12345",
+            top_k=1,
+            query_instruction="",
+            filters=None,
+        )
+        print(items[0].model_dump())
+    finally:
+        read_service.reset()
 
 asyncio.run(main())
 PY

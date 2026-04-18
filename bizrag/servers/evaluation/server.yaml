@@ -7,6 +7,8 @@ tools:
       gt_ls: null
       metrics: $metrics
       save_path: $save_path
+    output:
+    - eval_res
   evaluate_trec:
     input:
       run_path: $run_path
@@ -14,6 +16,8 @@ tools:
       metrics: $ir_metrics
       ks: $ks
       save_path: $save_path
+    output:
+    - eval_res
   evaluate_trec_pvalue:
     input:
       run_new_path: $run_new_path
@@ -23,6 +27,8 @@ tools:
       ks: $ks
       n_resamples: $n_resamples
       save_path: $save_path
+    output:
+    - eval_res
   evaluate_structured:
     input:
       pred_struct_ls: $pred_struct_ls
@@ -30,3 +36,5 @@ tools:
       pred_citations_ls: $pred_citations_ls
       gt_citations_ls: $gt_citations_ls
       save_path: $save_path
+    output:
+    - eval_res
