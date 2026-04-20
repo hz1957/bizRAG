@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from bizrag.api.deps import get_read_service, require_admin
 from bizrag.service.app.file_service_inventory import FileServiceInventoryService
@@ -11,6 +12,7 @@ from bizrag.service.app.observability_service import ObservabilityService
 
 
 router = APIRouter()
+OPS_INDEX_HTML = Path(__file__).resolve().parents[1] / "static" / "ops" / "index.html"
 
 
 def _service(request: Request) -> ObservabilityService:
@@ -78,10 +80,6 @@ async def ops_files(
     )
 
 
-@router.get("/ops", response_class=HTMLResponse)
-async def ops_dashboard(request: Request) -> HTMLResponse:
-    read_service = get_read_service(request)
-    html = _service(request).render_dashboard_html(
-        read_service_status=read_service.health_status()
-    )
-    return HTMLResponse(html)
+@router.get("/ops")
+async def ops_dashboard() -> FileResponse:
+    return FileResponse(OPS_INDEX_HTML)

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>bizRAG Ops Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/ops-assets/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <h1>bizRAG Ops Dashboard</h1>
+        <div class="sub" id="generated-at">Loading dashboard data...</div>
+      </div>
+      <div class="pill" id="health-pill">health</div>
+    </div>
+
+    <div class="grid" id="inventory-grid"></div>
+
+    <div class="card section">
+      <h2>Alerts</h2>
+      <div class="alerts" id="alerts"></div>
+    </div>
+
+    <div class="card section">
+      <h2>Component Health</h2>
+      <div class="health-grid" id="health-grid"></div>
+    </div>
+
+    <div class="card section">
+      <h2>Component Metrics</h2>
+      <table>
+        <thead><tr><th>Component</th><th>Status Counts</th><th>P50 ms</th><th>P95 ms</th><th>Max ms</th></tr></thead>
+        <tbody id="component-metrics"></tbody>
+      </table>
+    </div>
+
+    <div class="card section">
+      <h2>Recent Spans</h2>
+      <div class="scroll-panel spans-panel">
+        <table>
+          <thead><tr><th>Started</th><th>Component</th><th>Operation</th><th>Status</th><th>Duration</th><th>KB</th><th></th></tr></thead>
+          <tbody id="recent-spans"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card section">
+      <h2>Query Console</h2>
+      <div class="sub">Send live retrieve or RAG requests against the running container service.</div>
+      <div class="input-row">
+        <select id="query-kb-id"></select>
+        <input id="query-top-k" type="number" min="1" step="1" value="3" placeholder="Top K" />
+      </div>
+      <div class="input-row">
+        <textarea id="query-text" placeholder="Enter a retrieval or RAG question"></textarea>
+      </div>
+      <div class="input-row">
+        <textarea id="query-system-prompt" placeholder="Optional system prompt for RAG"></textarea>
+      </div>
+      <div class="action-row">
+        <button type="button" onclick="runQuery('retrieve')">Retrieve</button>
+        <button type="button" class="primary" onclick="runQuery('rag')">RAG</button>
+      </div>
+      <div class="query-result">
+        <div class="sub" id="query-result-title">No request sent yet.</div>
+        <div class="query-meta" id="query-result-meta"></div>
+        <div id="query-result-body" class="query-empty">Use Retrieve to inspect matched chunks, or RAG to inspect the generated answer and citations.</div>
+      </div>
+    </div>
+
+    <div class="card section">
+      <h2>Data Tools</h2>
+      <div class="sub">Open raw health, overview, metrics, and file inventory in a modal when needed.</div>
+      <div class="toolbar compact">
+        <button type="button" onclick="openRawModal('health')">Raw Health</button>
+        <button type="button" onclick="openRawModal('overview')">Raw Overview</button>
+        <button type="button" onclick="openRawModal('metrics')">Raw Metrics</button>
+        <button type="button" onclick="openRawModal('files')">Raw File Inventory</button>
+      </div>
+    </div>
+
+    <div class="card section">
+      <h2>File Service Inventory</h2>
+      <div class="sub">File service files mapped to UltraRAG chunk ids and Milvus vector ids.</div>
+      <div id="file-service-summary" class="sub" style="margin-top:8px;"></div>
+      <div class="input-row">
+        <input id="file-search" type="search" placeholder="Search file name, kb_id, source_uri, file_id" oninput="renderFiles(currentFileInventory)" />
+      </div>
+      <div id="file-service-list" class="file-table-wrap scroll-panel files-panel"></div>
+    </div>
+  </div>
+
+  <dialog id="raw-modal" class="raw-modal">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h3 id="raw-modal-title">Raw Data</h3>
+        <button type="button" onclick="closeRawModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="raw-panel"><pre id="raw-modal-content"></pre></div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="file-modal" class="raw-modal">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h3 id="file-modal-title">File Details</h3>
+        <button type="button" onclick="closeFileModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="meta-list" id="file-modal-meta"></div>
+        <div class="chunk-list">
+          <div class="sub">Chunks and Milvus vector ids</div>
+          <div id="file-modal-chunks"></div>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="span-modal" class="raw-modal">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h3 id="span-modal-title">Span Details</h3>
+        <button type="button" onclick="closeSpanModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="meta-list" id="span-modal-meta"></div>
+        <div class="span-sections">
+          <div class="span-section" id="span-request-section">
+            <div class="sub">Request</div>
+            <div class="raw-panel"><pre id="span-modal-request"></pre></div>
+          </div>
+          <div class="span-section" id="span-response-section">
+            <div class="sub">Response</div>
+            <div class="raw-panel"><pre id="span-modal-response"></pre></div>
+          </div>
+          <div class="span-section">
+            <div class="sub">Raw Details</div>
+            <div class="raw-panel"><pre id="span-modal-details"></pre></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/ops-assets/app.js"></script>
+</body>
+</html>

@@ -81,6 +81,29 @@ class ReadService:
             metadata=metadata,
         )
 
+    @staticmethod
+    def _truncate_text(value: Any, limit: int = 280) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
+
+    @classmethod
+    def _summarize_items(cls, items: List[RetrieveItem], *, limit: int = 5) -> List[Dict[str, Any]]:
+        summary: List[Dict[str, Any]] = []
+        for item in items[:limit]:
+            summary.append(
+                {
+                    "title": item.title or item.file_name or item.doc_id,
+                    "file_name": item.file_name,
+                    "sheet_name": item.sheet_name,
+                    "row_index": item.row_index,
+                    "score": item.score,
+                    "content": cls._truncate_text(item.content, 220),
+                }
+            )
+        return summary
+
     def _read_pipeline_payload(
         self,
         *,
@@ -222,7 +245,15 @@ class ReadService:
                 component="retrieve",
                 operation="retrieve_items",
                 kb_id=kb_id,
-                details={"query": query, "top_k": top_k},
+                details={
+                    "request": {
+                        "kb_id": kb_id,
+                        "query": query,
+                        "top_k": top_k,
+                        "query_instruction": query_instruction,
+                        "filters": filters or {},
+                    }
+                },
             ) as span:
                 result = await self._pipeline_runner.run(
                     "retrieve_classic",
@@ -235,8 +266,15 @@ class ReadService:
                     ),
                 )
                 hits = extract_retrieve_items(result)
-                span.annotate(hit_count=len(hits))
-                return [self._normalize_hit(hit, kb_id=kb_id) for hit in hits]
+                normalized_hits = [self._normalize_hit(hit, kb_id=kb_id) for hit in hits]
+                span.annotate(
+                    hit_count=len(normalized_hits),
+                    response={
+                        "item_count": len(normalized_hits),
+                        "items": self._summarize_items(normalized_hits),
+                    },
+                )
+                return normalized_hits
         finally:
             store.close()
 
@@ -257,7 +295,16 @@ class ReadService:
                 component="retrieve",
                 operation="rag_answer",
                 kb_id=kb_id,
-                details={"query": query, "top_k": top_k},
+                details={
+                    "request": {
+                        "kb_id": kb_id,
+                        "query": query,
+                        "top_k": top_k,
+                        "query_instruction": query_instruction,
+                        "filters": filters or {},
+                        "system_prompt": system_prompt,
+                    }
+                },
             ) as span:
                 result = await self._pipeline_runner.run(
                     "rag_answer",
@@ -275,7 +322,15 @@ class ReadService:
                     for hit in extract_retrieve_items(result)
                 ]
                 answer = extract_first_text_output(result, "ans_ls")
-                span.annotate(citation_count=len(citations), answer_chars=len(answer))
+                span.annotate(
+                    citation_count=len(citations),
+                    answer_chars=len(answer),
+                    response={
+                        "answer": self._truncate_text(answer, 1200),
+                        "citation_count": len(citations),
+                        "citations": self._summarize_items(citations),
+                    },
+                )
                 return {
                     "answer": answer,
                     "raw_answer": extract_first_text_output(result, "ans_ls"),

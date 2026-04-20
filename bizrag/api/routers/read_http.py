@@ -30,6 +30,29 @@ def _model_to_dict(item: BaseModel) -> Dict[str, Any]:
     return item.dict()
 
 
+def _truncate_text(value: Any, limit: int = 280) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _summarize_retrieve_items(items: list[RetrieveItem], *, limit: int = 5) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for item in items[:limit]:
+        summary.append(
+            {
+                "title": item.title or item.file_name or item.doc_id,
+                "file_name": item.file_name,
+                "sheet_name": item.sheet_name,
+                "row_index": item.row_index,
+                "score": item.score,
+                "content": _truncate_text(item.content, 220),
+            }
+        )
+    return summary
+
+
 @router.get("/healthz")
 async def healthz(request: Request) -> Dict[str, str]:
     read_service = get_read_service(request)
@@ -69,7 +92,15 @@ async def retrieve(req: RetrieveRequest, request: Request) -> RetrieveResponse:
             component="api",
             operation="retrieve_endpoint",
             kb_id=req.kb_id,
-            details={"query": req.query, "top_k": req.top_k},
+            details={
+                "request": {
+                    "kb_id": req.kb_id,
+                    "query": req.query,
+                    "top_k": req.top_k,
+                    "query_instruction": req.query_instruction,
+                    "filters": req.filters,
+                }
+            },
         ) as span:
             items = await read_service.retrieve_items(
                 kb_id=req.kb_id,
@@ -78,7 +109,13 @@ async def retrieve(req: RetrieveRequest, request: Request) -> RetrieveResponse:
                 query_instruction=req.query_instruction,
                 filters=req.filters,
             )
-            span.annotate(item_count=len(items))
+            span.annotate(
+                item_count=len(items),
+                response={
+                    "item_count": len(items),
+                    "items": _summarize_retrieve_items(items),
+                },
+            )
             return RetrieveResponse(items=items)
     except ServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
@@ -98,7 +135,16 @@ async def rag(req: RAGRequest, request: Request) -> RAGResponse:
             component="api",
             operation="rag_endpoint",
             kb_id=req.kb_id,
-            details={"query": req.query, "top_k": req.top_k},
+            details={
+                "request": {
+                    "kb_id": req.kb_id,
+                    "query": req.query,
+                    "top_k": req.top_k,
+                    "query_instruction": req.query_instruction,
+                    "filters": req.filters,
+                    "system_prompt": req.system_prompt,
+                }
+            },
         ) as span:
             result = await read_service.generate_answer(
                 kb_id=req.kb_id,
@@ -111,6 +157,11 @@ async def rag(req: RAGRequest, request: Request) -> RAGResponse:
             span.annotate(
                 citation_count=len(result.get("citations") or []),
                 answer_chars=len(str(result.get("answer") or "")),
+                response={
+                    "answer": _truncate_text(result.get("answer"), 1200),
+                    "citation_count": len(result.get("citations") or []),
+                    "citations": _summarize_retrieve_items(result.get("citations") or []),
+                },
             )
             return RAGResponse(**result)
     except ServiceError as exc:

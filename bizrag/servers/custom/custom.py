@@ -248,22 +248,24 @@ def _format_retrieve_item(item: Dict[str, Any], rank: int) -> str:
     sheet_name = str(item.get("sheet_name") or "").strip()
     row_index = item.get("row_index")
     source_uri = str(item.get("source_uri") or "").strip()
-    title = str(item.get("title") or item.get("file_name") or f"Document {rank}").strip()
+    title = str(item.get("title") or item.get("file_name") or f"Result {rank}").strip()
     content = _strip_chunk_wrappers(item.get("content"))
 
-    source_parts = [f"[{rank}]"]
+    source_parts: List[str] = []
     if file_name:
-        source_parts.append(f"file={file_name}")
+        source_parts.append(f"File: {file_name}")
     elif title:
-        source_parts.append(f"title={title}")
+        source_parts.append(f"Title: {title}")
     if sheet_name:
-        source_parts.append(f"sheet={sheet_name}")
+        source_parts.append(f"Sheet: {sheet_name}")
     if row_index not in (None, ""):
-        source_parts.append(f"row={row_index}")
+        source_parts.append(f"Row: {row_index}")
     if source_uri:
-        source_parts.append(f"src={source_uri}")
+        source_parts.append(f"Source: {source_uri}")
 
-    lines = [" | ".join(source_parts)]
+    lines = []
+    if source_parts:
+        lines.append(" | ".join(source_parts))
     if content:
         lines.append(content)
     return "\n".join(lines).strip()
