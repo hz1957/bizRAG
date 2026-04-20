@@ -90,15 +90,22 @@ def build_read_pipeline_payload(
         },
         "sparse": sparse_cfg,
     }
+    if merge_cfg:
+        payload["custom"].update(
+            {
+                "merge_top_k": candidate_top_k * 2,
+                "strategy": merge_cfg.get("strategy", "rrf"),
+                "rrf_k": merge_cfg.get("rrf_k", 60),
+                "primary_weight": merge_cfg.get("primary_weight", 1.0),
+                "secondary_weight": merge_cfg.get("secondary_weight", 1.0),
+            }
+        )
 
     if reranker_cfg:
         reranker_cfg["query_list"] = [query]
         reranker_cfg["query_instruction"] = effective_instruction
         reranker_cfg["reranker_top_k"] = requested_top_k
         payload["reranker"] = reranker_cfg
-    if merge_cfg:
-        merge_cfg["merge_top_k"] = candidate_top_k * 2
-        payload["merge"] = merge_cfg
     if prompt_cfg:
         prompt_cfg["q_ls"] = [query]
         payload["prompt_builder"] = prompt_cfg

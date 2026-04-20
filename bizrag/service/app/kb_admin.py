@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from bizrag.common.observability import observe_operation
 from bizrag.infra.metadata_store import MetadataStore
 from bizrag.common.io_utils import (
     load_jsonl,
@@ -20,7 +21,10 @@ from bizrag.service.app.kb_artifacts import (
     normalize_chunk_rows,
     normalize_corpus_rows,
 )
-from bizrag.service.app.kb_config import materialize_kb_server_parameters
+from bizrag.service.app.kb_config import (
+    materialize_kb_server_parameters,
+    migrate_kb_server_parameters,
+)
 from bizrag.service.app.kb_files import (
     classify_source_type,
     discover_supported_files,
@@ -44,10 +48,26 @@ class KBAdmin:
         self.store = MetadataStore(metadata_db)
         self.workspace_root = Path(workspace_root)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
+        self._migrate_registered_kbs()
         self._indexer = KBIndexManager(store=self.store)
 
     def close(self) -> None:
         self.store.close()
+
+    def _migrate_registered_kbs(self) -> None:
+        for kb in self.store.list_kbs():
+            migrated = migrate_kb_server_parameters(kb=kb)
+            if migrated is None:
+                continue
+            self.store.register_kb(
+                kb_id=migrated["kb_id"],
+                collection_name=migrated["collection_name"],
+                display_name=migrated.get("display_name"),
+                source_root=migrated.get("source_root"),
+                workspace_dir=migrated["workspace_dir"],
+                retriever_config_path=migrated["retriever_config_path"],
+                index_uri=migrated["index_uri"],
+            )
 
     def register_kb(
         self,
@@ -76,8 +96,10 @@ class KBAdmin:
         resolved_index_uri = index_uri
         if not resolved_index_uri and str(cfg.get("index_backend") or "").lower() == "milvus":
             resolved_index_uri = milvus_cfg.get("uri")
-        if not resolved_index_uri:
-            resolved_index_uri = str(workspace_dir / "index" / "milvus_lite.db")
+        if str(cfg.get("index_backend") or "").lower() == "milvus" and not resolved_index_uri:
+            raise RuntimeError(
+                "Milvus backend requires retriever.index_backend_configs.milvus.uri or register-kb index_uri"
+            )
         materialized_config_path = materialize_kb_server_parameters(
             source_parameters_path=retriever_config_path,
             workspace_dir=workspace_dir,
@@ -143,34 +165,44 @@ class KBAdmin:
             },
         )
         try:
-            result_type = await self._upsert_file(
-                kb=kb,
-                file_path=file_path,
-                logical_source_uri=logical_source_uri,
-                logical_file_name=logical_file_name,
-                force=force,
-                prefer_mineru=prefer_mineru,
-                chunk_backend=chunk_backend,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-            )
-            active_doc = self.store.get_document(kb_id, source_uri)
-            index_mode = await self._indexer.sync_document_index(
-                kb=kb,
-                document=active_doc,
-                replace_existing=bool(existing_doc and existing_doc.get("status") == "active"),
-            )
-            result = {
-                "task_id": task_id,
-                "kb_id": kb_id,
-                "path": str(file_path),
-                "logical_source_uri": logical_source_uri or str(file_path),
-                "status": result_type,
-                "reindexed": True,
-                "index_mode": index_mode,
-            }
-            self.store.update_task(task_id, status="success", result=result)
-            return result
+            async with observe_operation(
+                store=self.store,
+                component="ingest",
+                operation="ingest_file",
+                kb_id=kb_id,
+                task_id=task_id,
+                source_uri=source_uri,
+                details={"path": str(file_path), "force": force},
+            ) as span:
+                result_type = await self._upsert_file(
+                    kb=kb,
+                    file_path=file_path,
+                    logical_source_uri=logical_source_uri,
+                    logical_file_name=logical_file_name,
+                    force=force,
+                    prefer_mineru=prefer_mineru,
+                    chunk_backend=chunk_backend,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
+                active_doc = self.store.get_document(kb_id, source_uri)
+                index_mode = await self._indexer.sync_document_index(
+                    kb=kb,
+                    document=active_doc,
+                    replace_existing=bool(existing_doc and existing_doc.get("status") == "active"),
+                )
+                result = {
+                    "task_id": task_id,
+                    "kb_id": kb_id,
+                    "path": str(file_path),
+                    "logical_source_uri": logical_source_uri or str(file_path),
+                    "status": result_type,
+                    "reindexed": True,
+                    "index_mode": index_mode,
+                }
+                span.annotate(result_type=result_type, index_mode=index_mode)
+                self.store.update_task(task_id, status="success", result=result)
+                return result
         except Exception as exc:
             self._record_failed_file(
                 kb=kb,
@@ -230,83 +262,101 @@ class KBAdmin:
         deleted_docs: List[Dict[str, Any]] = []
 
         try:
-            for file_path in files:
-                try:
-                    existing_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
-                    result = await self._upsert_file(
+            async with observe_operation(
+                store=self.store,
+                component="ingest",
+                operation="ingest_path",
+                kb_id=kb_id,
+                task_id=task_id,
+                source_uri=str(input_path),
+                details={"path": str(input_path), "force": force, "sync_deletions": sync_deletions},
+            ) as span:
+                for file_path in files:
+                    try:
+                        existing_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
+                        result = await self._upsert_file(
+                            kb=kb,
+                            file_path=file_path,
+                            logical_source_uri=None,
+                            logical_file_name=None,
+                            force=force,
+                            prefer_mineru=prefer_mineru,
+                            chunk_backend=chunk_backend,
+                            chunk_size=chunk_size,
+                            chunk_overlap=chunk_overlap,
+                        )
+                        if result == "created":
+                            created += 1
+                            changed = True
+                            active_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
+                            if active_doc is not None:
+                                changed_docs.append(active_doc)
+                        elif result == "updated":
+                            updated += 1
+                            changed = True
+                            if existing_doc is not None and existing_doc.get("status") == "active":
+                                replaced_doc_keys.append(str(existing_doc["doc_key"]))
+                            active_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
+                            if active_doc is not None:
+                                changed_docs.append(active_doc)
+                        else:
+                            skipped += 1
+                    except Exception as exc:
+                        failed += 1
+                        failed_items.append(
+                            {
+                                "source_uri": str(file_path.resolve()),
+                                "error": str(exc),
+                            }
+                        )
+                        self._record_failed_file(kb=kb, file_path=file_path, error_message=str(exc))
+                        logger.warning(
+                            "[kb_admin] Failed to ingest %s: %s",
+                            file_path,
+                            exc,
+                        )
+
+                if sync_deletions and input_path.is_dir():
+                    deleted_docs = self._sync_deleted_documents(kb=kb, scanned_root=input_path, keep_paths=files)
+                    deleted += len(deleted_docs)
+                    if deleted_docs:
+                        changed = True
+
+                if changed or force:
+                    index_mode = await self._indexer.sync_documents_index_batch(
                         kb=kb,
-                        file_path=file_path,
-                        logical_source_uri=None,
-                        logical_file_name=None,
-                        force=force,
-                        prefer_mineru=prefer_mineru,
-                        chunk_backend=chunk_backend,
-                        chunk_size=chunk_size,
-                        chunk_overlap=chunk_overlap,
+                        upsert_documents=changed_docs,
+                        replace_doc_keys=replaced_doc_keys,
+                        deleted_documents=deleted_docs,
                     )
-                    if result == "created":
-                        created += 1
-                        changed = True
-                        active_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
-                        if active_doc is not None:
-                            changed_docs.append(active_doc)
-                    elif result == "updated":
-                        updated += 1
-                        changed = True
-                        if existing_doc is not None and existing_doc.get("status") == "active":
-                            replaced_doc_keys.append(str(existing_doc["doc_key"]))
-                        active_doc = self.store.get_document(kb["kb_id"], str(file_path.resolve()))
-                        if active_doc is not None:
-                            changed_docs.append(active_doc)
-                    else:
-                        skipped += 1
-                except Exception as exc:
-                    failed += 1
-                    failed_items.append(
-                        {
-                            "source_uri": str(file_path.resolve()),
-                            "error": str(exc),
-                        }
-                    )
-                    self._record_failed_file(kb=kb, file_path=file_path, error_message=str(exc))
-                    logger.warning(
-                        "[kb_admin] Failed to ingest %s: %s",
-                        file_path,
-                        exc,
-                    )
+                else:
+                    index_mode = "noop"
 
-            if sync_deletions and input_path.is_dir():
-                deleted_docs = self._sync_deleted_documents(kb=kb, scanned_root=input_path, keep_paths=files)
-                deleted += len(deleted_docs)
-                if deleted_docs:
-                    changed = True
-
-            if changed or force:
-                index_mode = await self._indexer.sync_documents_index_batch(
-                    kb=kb,
-                    upsert_documents=changed_docs,
-                    replace_doc_keys=replaced_doc_keys,
-                    deleted_documents=deleted_docs,
+                result = {
+                    "task_id": task_id,
+                    "kb_id": kb_id,
+                    "files_seen": len(files),
+                    "created": created,
+                    "updated": updated,
+                    "skipped": skipped,
+                    "failed": failed,
+                    "deleted": deleted,
+                    "reindexed": bool(changed or force),
+                    "index_mode": index_mode,
+                }
+                if failed_items:
+                    result["failed_items"] = failed_items
+                span.annotate(
+                    files_seen=len(files),
+                    created=created,
+                    updated=updated,
+                    skipped=skipped,
+                    failed=failed,
+                    deleted=deleted,
+                    index_mode=index_mode,
                 )
-            else:
-                index_mode = "noop"
-
-            result = {
-                "task_id": task_id,
-                "kb_id": kb_id,
-                "files_seen": len(files),
-                "created": created,
-                "updated": updated,
-                "skipped": skipped,
-                "failed": failed,
-                "deleted": deleted,
-                "reindexed": bool(changed or force),
-                "index_mode": index_mode,
-            }
-            if failed_items:
-                result["failed_items"] = failed_items
-            self.store.update_task(task_id, status="success", result=result)
-            return result
+                self.store.update_task(task_id, status="success", result=result)
+                return result
         except Exception as exc:
             self.store.update_task(task_id, status="failed", error_message=str(exc))
             raise

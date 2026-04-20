@@ -71,15 +71,15 @@ Current project convention is `pipeline-first`.
 If a new write capability is added, the expected order is:
 
 1. add or reuse `bizrag/pipelines/*.yaml`
-2. call it from `bizrag/service/app/*` with `bizrag/service/ultrarag/runner.py`
+2. call it from `bizrag/service/app/*` with `bizrag/service/ultrarag/pipeline_runner.py`
 3. keep UltraRAG-specific adaptation inside `servers/*` or pipeline companion yaml when possible
 
 ## Pipeline Runner
 
-Internal pipeline execution is handled by `bizrag/service/ultrarag/runner.py`.
+Internal pipeline execution is handled by `bizrag/service/ultrarag/pipeline_runner.py`.
 
 ```python
-from bizrag.service.ultrarag.runner import DEFAULT_PIPELINE_RUNNER
+from bizrag.service.ultrarag.pipeline_runner import DEFAULT_PIPELINE_RUNNER
 
 await DEFAULT_PIPELINE_RUNNER.run(
     "build_text_corpus",
@@ -153,6 +153,30 @@ Example extract request:
 }
 ```
 
+## Observability
+
+Phase 5 now includes a first-pass observability surface for the core chains:
+
+- `ingest`
+- `queue`
+- `worker`
+- `index`
+- `retrieve`
+- `extract`
+
+Available endpoints:
+
+- `GET /api/v1/admin/ops/health`
+- `GET /api/v1/admin/ops/overview`
+- `GET /api/v1/admin/ops/spans`
+- `GET /api/v1/admin/ops/metrics`
+- `GET /ops`
+
+`/ops` is a lightweight web UI backed by the overview API and auto-refreshes in the browser.
+`/api/v1/admin/ops/metrics` returns Prometheus-style text metrics.
+Operation spans are persisted through `MetadataStore`, so API, MQ bridge, and worker activity
+can be inspected in one place instead of only in process-local logs.
+
 ## Docs
 
 - BizAgent 平台接入与分阶段计划：[bizrag/docs/BizAgentPlatform.md](/Users/haoming.zhang/PyCharmMiscProject/bizRAG/bizrag/docs/BizAgentPlatform.md:1)
@@ -178,6 +202,17 @@ docker compose up --build
 Notes:
 
 - `bizrag` currently runs API, MQ bridge, and worker in one container.
+- Container compute mode is controlled by:
+  - `BIZRAG_ACCELERATOR=cpu|cuda|auto`
+  - `BIZRAG_GPU_IDS` when `BIZRAG_ACCELERATOR=cuda`
+- The default compose template uses `BIZRAG_ACCELERATOR=cpu`, which is the correct mode for Docker on macOS.
+- Read path warmup is controlled by:
+  - `BIZRAG_READ_WARMUP=true|false`
+  - `BIZRAG_READ_WARMUP_MODE=all|first|none`
+  - `BIZRAG_READ_WARMUP_KB_IDS=kb_a,kb_b`
+- The default compose template enables startup warmup so the first retrieval requests are already prepared after container boot.
+- `BIZRAG_READ_WARMUP` controls whether warmup runs at startup (default: true).
+- warmup mode is controlled by `BIZRAG_READ_WARMUP_MODE=all|first|none` and affects how many KBs are actively probed during startup.
 - `rustfs` is provided as a Phase 5 placeholder service behind the `rustfs` profile.
   Replace `RUSTFS_IMAGE` in `.env` with the actual image used in your environment, then start it with:
 
@@ -189,16 +224,17 @@ docker compose --profile rustfs up --build
 - MySQL database and user are initialized by the standard `mysql` image environment variables in `.env`.
 - BizRAG metadata tables are created automatically by `MetadataStore` on first startup; no separate SQL bootstrap is required for the current schema.
 - `HF_CACHE_DIR` can be pointed at an existing HuggingFace cache directory to avoid downloading embedding models again inside the container.
+- `BIZRAG_HF_OFFLINE` defaults to `true` in the container profile so retriever/reranker startup uses the mounted local cache instead of probing HuggingFace over the network.
 
-### Docker Dev Hot Reload
+### Docker Hot Reload
 
-The `bizrag` service is now configured for source-mounted development by default:
+The `bizrag` service mounts source into the container:
 
 - `./bizrag -> /app/bizrag`
 - `./docker -> /app/docker`
 - `./pyproject.toml -> /app/pyproject.toml`
 
-`BIZRAG_HOT_RELOAD` defaults to `true` in `docker-compose.yml`.
+`BIZRAG_HOT_RELOAD` defaults to `false` in `docker-compose.yml`.
 When enabled, the container runs a small supervisor that watches the mounted source tree
 and automatically restarts:
 
@@ -206,8 +242,10 @@ and automatically restarts:
 - the RustFS worker
 - the RustFS MQ bridge
 
-This is intended for day-to-day service development, so changes under `bizrag/` or
-`docker/` usually take effect without rebuilding the image.
+Keep it disabled for normal container runs so startup warmup happens once at container
+boot instead of being interrupted by source watching. Enable it only for day-to-day
+service development, where changes under `bizrag/` or `docker/` should take effect
+without rebuilding the image.
 
 Typical workflow:
 
@@ -216,13 +254,20 @@ docker compose up -d --build
 docker compose logs -f bizrag
 ```
 
+If you want dev hot reload:
+
+```bash
+export BIZRAG_HOT_RELOAD=true
+docker compose up -d bizrag
+```
+
 If you edit Python dependencies in `pyproject.toml`, you still need to rebuild the image:
 
 ```bash
 docker compose up -d --build bizrag
 ```
 
-To disable hot reload for a more production-like local run, set:
+To return to the default container mode:
 
 ```bash
 export BIZRAG_HOT_RELOAD=false

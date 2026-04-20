@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -17,6 +18,9 @@ class ApiRuntimeConfig:
     workspace_root: str = "runtime/kbs"
     rustfs_token: str = ""
     rustfs_shared_secret: str = ""
+    read_warmup_enabled: bool = True
+    read_warmup_mode: str = "all"
+    read_warmup_kb_ids: List[str] | None = None
 
 
 @dataclass
@@ -36,6 +40,9 @@ def configure_api(
     workspace_root: str,
     rustfs_token: str = "",
     rustfs_shared_secret: str = "",
+    read_warmup_enabled: bool = True,
+    read_warmup_mode: str = "all",
+    read_warmup_kb_ids: Optional[List[str]] = None,
 ) -> None:
     setattr(
         app.state,
@@ -45,6 +52,9 @@ def configure_api(
             workspace_root=workspace_root,
             rustfs_token=rustfs_token,
             rustfs_shared_secret=rustfs_shared_secret,
+            read_warmup_enabled=read_warmup_enabled,
+            read_warmup_mode=read_warmup_mode,
+            read_warmup_kb_ids=list(read_warmup_kb_ids or []),
         ),
     )
 
@@ -70,12 +80,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     setattr(app.state, STATE_SERVICES, services)
     try:
+        if config.read_warmup_enabled:
+            await services.read_service.warmup(
+                mode=config.read_warmup_mode,
+                kb_ids=config.read_warmup_kb_ids,
+            )
+        else:
+            services.read_service.mark_ready()
         yield
     finally:
         if services.admin is not None:
             services.admin.close()
         if services.read_service is not None:
-            services.read_service.reset()
+            await services.read_service.reset()
         setattr(app.state, STATE_SERVICES, ApiServices())
 
 
@@ -88,6 +105,13 @@ def _get_services(request: Request) -> ApiServices:
 
 def get_runtime_config(request: Request) -> ApiRuntimeConfig:
     return _get_runtime_config_from_app(request.app)
+
+
+def env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
 def require_admin(request: Request) -> KBAdmin:

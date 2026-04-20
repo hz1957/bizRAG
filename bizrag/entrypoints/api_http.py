@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 import uvicorn
 
 from bizrag.api.app import fastapi_app
-from bizrag.api.deps import configure_api
+from bizrag.api.deps import configure_api, env_flag
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,12 +42,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    warmup_kb_ids = [
+        item.strip()
+        for item in str(os.environ.get("BIZRAG_READ_WARMUP_KB_IDS", "")).split(",")
+        if item.strip()
+    ]
     configure_api(
         app=fastapi_app,
         metadata_db_path=args.metadata_db,
         workspace_root=args.workspace_root,
         rustfs_token=args.rustfs_token,
         rustfs_shared_secret=args.rustfs_shared_secret,
+        read_warmup_enabled=env_flag("BIZRAG_READ_WARMUP", True),
+        read_warmup_mode=str(os.environ.get("BIZRAG_READ_WARMUP_MODE", "all") or "all"),
+        read_warmup_kb_ids=warmup_kb_ids,
     )
     uvicorn.run(fastapi_app, host=args.host, port=args.port, reload=False)
 

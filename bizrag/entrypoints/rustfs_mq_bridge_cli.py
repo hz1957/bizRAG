@@ -5,6 +5,7 @@ import asyncio
 import json
 from typing import Any, Dict, Iterable, List
 
+from bizrag.common.observability import observe_operation
 from bizrag.contracts.schemas import RustFSEventRequest
 from bizrag.service.app.kb_admin import KBAdmin
 from bizrag.service.app.rustfs_events import enqueue_rustfs_event
@@ -76,26 +77,33 @@ def enqueue_message(
     raw_message: bytes,
     max_events_per_message: int,
 ) -> Dict[str, Any]:
-    try:
-        payload = json.loads(raw_message.decode("utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"Invalid MQ message JSON: {exc}") from exc
+    with observe_operation(
+        store=admin.store,
+        component="queue",
+        operation="mq_bridge_message",
+        details={"max_events_per_message": max_events_per_message},
+    ) as span:
+        try:
+            payload = json.loads(raw_message.decode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Invalid MQ message JSON: {exc}") from exc
 
-    events = _normalize_message_events(payload, max_events_per_message)
-    results = [
-        enqueue_rustfs_event(
-            admin=admin,
-            req=event,
-            x_rustfs_token=None,
-            x_rustfs_timestamp=None,
-            x_rustfs_signature=None,
-        )
-        for event in events
-    ]
-    return {
-        "queued": len(results),
-        "items": results,
-    }
+        events = _normalize_message_events(payload, max_events_per_message)
+        results = [
+            enqueue_rustfs_event(
+                admin=admin,
+                req=event,
+                x_rustfs_token=None,
+                x_rustfs_timestamp=None,
+                x_rustfs_signature=None,
+            )
+            for event in events
+        ]
+        span.annotate(event_count=len(results))
+        return {
+            "queued": len(results),
+            "items": results,
+        }
 
 
 async def run_kafka_bridge(args: argparse.Namespace) -> None:

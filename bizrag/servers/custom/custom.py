@@ -235,9 +235,38 @@ def merge_retrieve_items(
 
 
 def _format_retrieve_item(item: Dict[str, Any], rank: int) -> str:
+    def _strip_chunk_wrappers(text: Any) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        match = re.match(r"^Title:\n.*?\n\nContent:\n(.*)$", value, flags=re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return value
+
+    file_name = str(item.get("file_name") or "").strip()
+    sheet_name = str(item.get("sheet_name") or "").strip()
+    row_index = item.get("row_index")
+    source_uri = str(item.get("source_uri") or "").strip()
     title = str(item.get("title") or item.get("file_name") or f"Document {rank}").strip()
-    content = str(item.get("content") or "").strip()
-    return f"[{rank}] {title}\n{content}".strip()
+    content = _strip_chunk_wrappers(item.get("content"))
+
+    source_parts = [f"[{rank}]"]
+    if file_name:
+        source_parts.append(f"file={file_name}")
+    elif title:
+        source_parts.append(f"title={title}")
+    if sheet_name:
+        source_parts.append(f"sheet={sheet_name}")
+    if row_index not in (None, ""):
+        source_parts.append(f"row={row_index}")
+    if source_uri:
+        source_parts.append(f"src={source_uri}")
+
+    lines = [" | ".join(source_parts)]
+    if content:
+        lines.append(content)
+    return "\n".join(lines).strip()
 
 
 @app.tool(output="ret_items->ret_psg")

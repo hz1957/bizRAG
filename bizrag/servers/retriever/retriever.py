@@ -39,6 +39,8 @@ DEFAULT_STRUCTURED_OUTPUT_FIELDS = [
 
 class Retriever:
     def __init__(self, mcp_inst: UltraRAG_MCP_Server):
+        self._init_signature: Optional[tuple[Any, ...]] = None
+        self._inherited_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         mcp_inst.tool(
             self.retriever_init,
             output="model_name_or_path,backend_configs,batch_size,corpus_path,gpu_ids,is_multimodal,backend,index_backend,index_backend_configs,is_demo,collection_name->None",
@@ -107,6 +109,77 @@ class Retriever:
             Filtered dictionary
         """
         return {k: v for k, v in (d or {}).items() if k not in banned and v is not None}
+
+    def _restore_inherited_cuda_visible_devices(self) -> None:
+        if self._inherited_cuda_visible_devices is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = self._inherited_cuda_visible_devices
+
+    @staticmethod
+    def _path_mtime_ns(path: Optional[str]) -> Optional[int]:
+        if not path:
+            return None
+        path_obj = Path(path)
+        if not path_obj.exists():
+            return None
+        return path_obj.stat().st_mtime_ns
+
+    @classmethod
+    def _dir_state_mtime_ns(cls, path: Optional[str]) -> Optional[int]:
+        if not path:
+            return None
+        path_obj = Path(path)
+        if not path_obj.exists():
+            return None
+        if path_obj.is_file():
+            return path_obj.stat().st_mtime_ns
+        latest = path_obj.stat().st_mtime_ns
+        for entry in path_obj.rglob("*"):
+            try:
+                latest = max(latest, entry.stat().st_mtime_ns)
+            except FileNotFoundError:
+                continue
+        return latest
+
+    @classmethod
+    def _build_init_signature(
+        cls,
+        *,
+        model_name_or_path: str,
+        backend_configs: Dict[str, Any],
+        batch_size: int,
+        corpus_path: str,
+        gpu_ids: Optional[Union[str, int]],
+        is_multimodal: bool,
+        backend: str,
+        index_backend: str,
+        index_backend_configs: Optional[Dict[str, Any]],
+        is_demo: bool,
+        collection_name: str,
+    ) -> tuple[Any, ...]:
+        normalized_backend = str(backend or "").lower()
+        normalized_index_backend = str(index_backend or "").lower()
+        normalized_backend_configs = backend_configs or {}
+        normalized_index_backend_configs = index_backend_configs or {}
+        bm25_save_path = (
+            normalized_backend_configs.get("bm25", {}) or {}
+        ).get("save_path")
+        return (
+            str(model_name_or_path),
+            normalized_backend,
+            normalized_index_backend,
+            int(batch_size),
+            "" if gpu_ids is None else str(gpu_ids),
+            bool(is_multimodal),
+            bool(is_demo),
+            str(collection_name or ""),
+            str(corpus_path or ""),
+            cls._path_mtime_ns(corpus_path),
+            cls._dir_state_mtime_ns(bm25_save_path),
+            orjson.dumps(normalized_backend_configs),
+            orjson.dumps(normalized_index_backend_configs),
+        )
 
     @staticmethod
     def _resolve_output_fields(output_fields: Optional[List[str]]) -> List[str]:
@@ -420,6 +493,25 @@ class Retriever:
             ValueError: If required config is missing
             ValidationError: If demo mode requirements are not met
         """
+        init_signature = self._build_init_signature(
+            model_name_or_path=model_name_or_path,
+            backend_configs=backend_configs,
+            batch_size=batch_size,
+            corpus_path=corpus_path,
+            gpu_ids=gpu_ids,
+            is_multimodal=is_multimodal,
+            backend=backend,
+            index_backend=index_backend,
+            index_backend_configs=index_backend_configs,
+            is_demo=is_demo,
+            collection_name=collection_name,
+        )
+        if self._init_signature == init_signature:
+            app.logger.info(
+                "[retriever] Initialization skipped; configuration and corpus state unchanged."
+            )
+            return
+
         self.is_demo = is_demo
         self.batch_size = batch_size
         self.corpus_path = corpus_path
@@ -455,6 +547,7 @@ class Retriever:
         self.cfg = self.backend_configs.get(self.backend, {})
 
         if gpu_ids is None:
+            self._restore_inherited_cuda_visible_devices()
             self.gpu_ids = None
             self.device = "cpu"
             self.device_num = 1
@@ -676,6 +769,8 @@ class Retriever:
                     )
                 info_msg = "[bm25] Retriever initialized without index."
                 app.logger.info(info_msg)
+
+        self._init_signature = init_signature
 
     async def retriever_embed(
         self,

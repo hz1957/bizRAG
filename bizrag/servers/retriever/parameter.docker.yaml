@@ -1,5 +1,5 @@
 retriever:
-  model_name_or_path: models--BAAI--bge-large-zh-v1.5
+  model_name_or_path: BAAI/bge-large-zh-v1.5
   index_backend: milvus
   batch_size: 8
   gpu_ids: null
@@ -13,7 +13,7 @@ retriever:
       id_max_length: 128
 
 reranker:
-  model_name_or_path: models--BAAI--bge-reranker-large
+  model_name_or_path: BAAI/bge-reranker-large
   batch_size: 8
   gpu_ids: null
   backend_configs:

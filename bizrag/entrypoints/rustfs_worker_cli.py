@@ -5,6 +5,7 @@ import asyncio
 import json
 from typing import Any, Dict
 
+from bizrag.common.observability import observe_operation
 from bizrag.contracts.schemas import RustFSEventRequest
 from bizrag.service.app.kb_admin import KBAdmin
 from bizrag.service.app.rustfs_events import handle_rustfs_event_request
@@ -71,15 +72,24 @@ async def process_claimed_event(admin: KBAdmin, event: Dict[str, Any]) -> Dict[s
 
         return await asyncio.to_thread(_runner)
 
-    return await handle_rustfs_event_request(
-        admin=admin,
-        req=req,
-        run_admin_async=_run_admin_async,
-        x_rustfs_token=None,
-        x_rustfs_timestamp=None,
-        x_rustfs_signature=None,
-        verify_headers=False,
-    )
+    async with observe_operation(
+        store=admin.store,
+        component="worker",
+        operation="process_claimed_event",
+        kb_id=str(event.get("kb_id") or req.kb_id),
+        event_id=str(event.get("event_id") or req.event_id or ""),
+        source_uri=str(event.get("source_uri") or req.source_uri or ""),
+        details={"event_type": req.event_type},
+    ):
+        return await handle_rustfs_event_request(
+            admin=admin,
+            req=req,
+            run_admin_async=_run_admin_async,
+            x_rustfs_token=None,
+            x_rustfs_timestamp=None,
+            x_rustfs_signature=None,
+            verify_headers=False,
+        )
 
 
 async def run_worker(args: argparse.Namespace) -> None:

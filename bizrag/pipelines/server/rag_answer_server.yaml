@@ -20,6 +20,22 @@ custom:
       - query_instruction
       - filters
       - output_fields
+    merge_retrieve_items:
+      input:
+        ret_items: ret_items
+        temp_items: temp_items
+        top_k: merge_top_k
+        strategy: $strategy
+        rrf_k: $rrf_k
+        primary_weight: $primary_weight
+        secondary_weight: $secondary_weight
+      output:
+      - ret_items
+    retrieve_items_to_passages:
+      input:
+        ret_items: ret_items
+      output:
+      - ret_psg
 dense:
   parameter: bizrag/servers/retriever/parameter.yaml
   path: bizrag/servers/retriever/retriever.py
@@ -72,21 +88,6 @@ sparse:
         output_fields: output_fields
       output:
       - ret_items
-merge:
-  parameter: bizrag/servers/custom/parameter.yaml
-  path: bizrag/servers/custom/custom.py
-  tools:
-    merge_retrieve_items:
-      input:
-        ret_items: ret_items
-        temp_items: temp_items
-        top_k: merge_top_k
-        strategy: $strategy
-        rrf_k: $rrf_k
-        primary_weight: $primary_weight
-        secondary_weight: $secondary_weight
-      output:
-      - ret_items
 reranker:
   parameter: bizrag/servers/reranker/parameter.yaml
   path: bizrag/servers/reranker/reranker.py
@@ -106,29 +107,14 @@ reranker:
         query_instruction: query_instruction
       output:
       - ret_items
-custom_post:
-  parameter: bizrag/servers/custom/parameter.yaml
-  path: bizrag/servers/custom/custom.py
-  tools:
-    retrieve_items_to_passages:
-      input:
-        ret_items: ret_items
-      output:
-      - ret_psg
-    output_extract_from_boxed:
-      input:
-        ans_ls: ans_ls
-      output:
-      - pred_ls
 prompt_builder:
-  parameter: bizrag/servers/prompt/parameter.yaml
+  parameter: bizrag/servers/prompt/parameter.rag.yaml
   path: bizrag/servers/prompt/prompt.py
   tools:
-    qa_rag_boxed:
+    qa_rag:
       input:
         q_ls: q_ls
         ret_psg: ret_psg
-        template: $template
       output:
       - prompt_ls
 generation:

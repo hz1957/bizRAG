@@ -13,6 +13,7 @@ dependencies = [
     "PyYAML",
     "pandas",
     "PyMySQL",
+    "openpyxl",
     "xlrd>=2.0.1",
     "fastapi",
     "uvicorn",

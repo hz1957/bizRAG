@@ -137,6 +137,30 @@ class MetadataStore:
 
                 CREATE INDEX IF NOT EXISTS idx_rustfs_events_kb_created
                 ON rustfs_events (kb_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS operation_spans (
+                    span_id TEXT PRIMARY KEY,
+                    trace_id TEXT NOT NULL,
+                    parent_span_id TEXT,
+                    component TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    kb_id TEXT,
+                    task_id TEXT,
+                    event_id TEXT,
+                    source_uri TEXT,
+                    status TEXT NOT NULL,
+                    details_json TEXT,
+                    error_message TEXT,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    duration_ms REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operation_spans_started
+                ON operation_spans (started_at);
+
+                CREATE INDEX IF NOT EXISTS idx_operation_spans_component_status
+                ON operation_spans (component, status, started_at);
                 """
             )
             self.conn.commit()
@@ -204,6 +228,27 @@ class MetadataStore:
                 created_at VARCHAR(64) NOT NULL,
                 updated_at VARCHAR(64) NOT NULL,
                 INDEX idx_rustfs_events_kb_created (kb_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS operation_spans (
+                span_id VARCHAR(64) PRIMARY KEY,
+                trace_id VARCHAR(64) NOT NULL,
+                parent_span_id VARCHAR(64) NULL,
+                component VARCHAR(64) NOT NULL,
+                operation VARCHAR(128) NOT NULL,
+                kb_id VARCHAR(255) NULL,
+                task_id VARCHAR(64) NULL,
+                event_id VARCHAR(128) NULL,
+                source_uri VARCHAR(512) NULL,
+                status VARCHAR(64) NOT NULL,
+                details_json LONGTEXT NULL,
+                error_message LONGTEXT NULL,
+                started_at VARCHAR(64) NOT NULL,
+                ended_at VARCHAR(64) NULL,
+                duration_ms DOUBLE NULL,
+                INDEX idx_operation_spans_started (started_at),
+                INDEX idx_operation_spans_component_status (component, status, started_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """,
         ]
@@ -341,6 +386,14 @@ class MetadataStore:
         finally:
             cursor.close()
 
+    def count_kbs(self) -> int:
+        cursor = self._execute("SELECT COUNT(*) AS total FROM knowledge_bases")
+        try:
+            row = self._row_to_dict(cursor.fetchone()) or {}
+            return int(row.get("total") or 0)
+        finally:
+            cursor.close()
+
     def get_document(self, kb_id: str, source_uri: str) -> Optional[Dict[str, Any]]:
         cursor = self._execute(
             "SELECT * FROM documents WHERE kb_id = ? AND source_uri = ?",
@@ -474,6 +527,23 @@ class MetadataStore:
         finally:
             cursor.close()
 
+    def count_documents_by_status(self, kb_id: Optional[str] = None) -> Dict[str, int]:
+        sql = "SELECT status, COUNT(*) AS total FROM documents"
+        params: List[Any] = []
+        if kb_id:
+            sql += " WHERE kb_id = ?"
+            params.append(kb_id)
+        sql += " GROUP BY status"
+        cursor = self._execute(sql, params)
+        try:
+            counts: Dict[str, int] = {}
+            for row in cursor.fetchall():
+                data = self._row_to_dict(row) or {}
+                counts[str(data.get("status") or "unknown")] = int(data.get("total") or 0)
+            return counts
+        finally:
+            cursor.close()
+
     def create_task(
         self,
         *,
@@ -584,6 +654,23 @@ class MetadataStore:
         finally:
             cursor.close()
 
+    def count_tasks_by_status(self, kb_id: Optional[str] = None) -> Dict[str, int]:
+        sql = "SELECT status, COUNT(*) AS total FROM tasks"
+        params: List[Any] = []
+        if kb_id:
+            sql += " WHERE kb_id = ?"
+            params.append(kb_id)
+        sql += " GROUP BY status"
+        cursor = self._execute(sql, params)
+        try:
+            counts: Dict[str, int] = {}
+            for row in cursor.fetchall():
+                data = self._row_to_dict(row) or {}
+                counts[str(data.get("status") or "unknown")] = int(data.get("total") or 0)
+            return counts
+        finally:
+            cursor.close()
+
     def create_rustfs_event(
         self,
         *,
@@ -691,6 +778,154 @@ class MetadataStore:
                 if event is not None:
                     events.append(event)
             return events
+        finally:
+            cursor.close()
+
+    def count_rustfs_events_by_status(self, kb_id: Optional[str] = None) -> Dict[str, int]:
+        sql = "SELECT status, COUNT(*) AS total FROM rustfs_events"
+        params: List[Any] = []
+        if kb_id:
+            sql += " WHERE kb_id = ?"
+            params.append(kb_id)
+        sql += " GROUP BY status"
+        cursor = self._execute(sql, params)
+        try:
+            counts: Dict[str, int] = {}
+            for row in cursor.fetchall():
+                data = self._row_to_dict(row) or {}
+                counts[str(data.get("status") or "unknown")] = int(data.get("total") or 0)
+            return counts
+        finally:
+            cursor.close()
+
+    def create_operation_span(
+        self,
+        *,
+        span_id: str,
+        trace_id: str,
+        parent_span_id: Optional[str],
+        component: str,
+        operation: str,
+        kb_id: Optional[str],
+        task_id: Optional[str],
+        event_id: Optional[str],
+        source_uri: Optional[str],
+        status: str,
+        started_at: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        self._execute(
+            """
+            INSERT INTO operation_spans (
+                span_id, trace_id, parent_span_id, component, operation,
+                kb_id, task_id, event_id, source_uri, status,
+                details_json, error_message, started_at, ended_at, duration_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                span_id,
+                trace_id,
+                parent_span_id,
+                component,
+                operation,
+                kb_id,
+                task_id,
+                event_id,
+                source_uri,
+                status,
+                json.dumps(details or {}, ensure_ascii=False),
+                None,
+                started_at,
+                None,
+                None,
+            ),
+        )
+        self.conn.commit()
+        span = self.get_operation_span(span_id)
+        assert span is not None
+        return span
+
+    def finish_operation_span(
+        self,
+        *,
+        span_id: str,
+        status: str,
+        ended_at: str,
+        duration_ms: float,
+        details: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        existing = self.get_operation_span(span_id)
+        if existing is None:
+            return None
+        self._execute(
+            """
+            UPDATE operation_spans
+            SET status = ?,
+                details_json = ?,
+                error_message = ?,
+                ended_at = ?,
+                duration_ms = ?
+            WHERE span_id = ?
+            """,
+            (
+                status,
+                json.dumps(details or existing.get("details_json") or {}, ensure_ascii=False),
+                error_message,
+                ended_at,
+                float(duration_ms),
+                span_id,
+            ),
+        )
+        self.conn.commit()
+        return self.get_operation_span(span_id)
+
+    def get_operation_span(self, span_id: str) -> Optional[Dict[str, Any]]:
+        cursor = self._execute(
+            "SELECT * FROM operation_spans WHERE span_id = ?",
+            (span_id,),
+        )
+        try:
+            return self._decode_json_fields(self._row_to_dict(cursor.fetchone()), "details_json")
+        finally:
+            cursor.close()
+
+    def list_operation_spans(
+        self,
+        *,
+        component: Optional[str] = None,
+        kb_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if component:
+            clauses.append("component = ?")
+            params.append(component)
+        if kb_id:
+            clauses.append("kb_id = ?")
+            params.append(kb_id)
+        if trace_id:
+            clauses.append("trace_id = ?")
+            params.append(trace_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        sql = "SELECT * FROM operation_spans"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        cursor = self._execute(sql, params)
+        try:
+            rows: List[Dict[str, Any]] = []
+            for row in cursor.fetchall():
+                item = self._decode_json_fields(self._row_to_dict(row), "details_json")
+                if item is not None:
+                    rows.append(item)
+            return rows
         finally:
             cursor.close()
 

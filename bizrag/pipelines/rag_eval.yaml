@@ -2,7 +2,6 @@ servers:
   benchmark: bizrag/servers/benchmark
   dense: bizrag/servers/retriever
   sparse: bizrag/servers/retriever
-  merge: bizrag/servers/custom
   reranker: bizrag/servers/reranker
   custom: bizrag/servers/custom
   prompt_builder: bizrag/servers/prompt
@@ -23,7 +22,7 @@ pipeline:
       query_list: q_ls
     output:
       ret_items: temp_items
-- merge.merge_retrieve_items:
+- custom.merge_retrieve_items:
     input:
       ret_items: ret_items
       temp_items: temp_items

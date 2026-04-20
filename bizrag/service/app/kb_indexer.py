@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from bizrag.common.observability import observe_operation
 from bizrag.infra.metadata_store import MetadataStore
 from bizrag.common.io_utils import load_jsonl, write_jsonl
 from bizrag.service.ultrarag.pipeline_outputs import extract_int_output
@@ -74,16 +75,23 @@ class KBIndexManager:
         overwrite: bool,
         collection_name: str,
     ) -> None:
-        await DEFAULT_PIPELINE_RUNNER.run(
-            "milvus_index",
-            params=self._retriever_params(
-                runtime_cfg,
-                corpus_path=corpus_path,
-                embedding_path=embedding_path,
-                overwrite=overwrite,
-                collection_name=collection_name,
-            ),
-        )
+        async with observe_operation(
+            store=self._store,
+            component="index",
+            operation="milvus_index",
+            kb_id=collection_name,
+            details={"corpus_path": corpus_path, "overwrite": overwrite},
+        ):
+            await DEFAULT_PIPELINE_RUNNER.run(
+                "milvus_index",
+                params=self._retriever_params(
+                    runtime_cfg,
+                    corpus_path=corpus_path,
+                    embedding_path=embedding_path,
+                    overwrite=overwrite,
+                    collection_name=collection_name,
+                ),
+            )
 
     async def _build_bm25_index(
         self,
@@ -92,14 +100,21 @@ class KBIndexManager:
         corpus_path: str,
         overwrite: bool,
     ) -> None:
-        await DEFAULT_PIPELINE_RUNNER.run(
-            "bm25_index",
-            params=self._bm25_params(
-                runtime_cfg,
-                corpus_path=corpus_path,
-                overwrite=overwrite,
-            ),
-        )
+        async with observe_operation(
+            store=self._store,
+            component="index",
+            operation="bm25_index",
+            kb_id=str(runtime_cfg.get("collection_name") or ""),
+            details={"corpus_path": corpus_path, "overwrite": overwrite},
+        ):
+            await DEFAULT_PIPELINE_RUNNER.run(
+                "bm25_index",
+                params=self._bm25_params(
+                    runtime_cfg,
+                    corpus_path=corpus_path,
+                    overwrite=overwrite,
+                ),
+            )
 
     async def _delete_doc_key(
         self,
@@ -158,40 +173,52 @@ class KBIndexManager:
         document: Optional[Dict[str, Any]],
         replace_existing: bool,
     ) -> str:
-        active_docs, paths, runtime_cfg = self.refresh_combined_artifacts(kb)
-        if document is None or document.get("status") != "active":
-            if not active_docs:
-                self._clear_bm25_artifacts(paths)
-                await self._drop_collection(kb)
-                return "drop_collection"
-            await self.rebuild_kb(kb=kb)
-            return "full_rebuild"
+        async with observe_operation(
+            store=self._store,
+            component="index",
+            operation="sync_document_index",
+            kb_id=str(kb["kb_id"]),
+            source_uri=str(document.get("source_uri") or "") if document else None,
+            details={"replace_existing": replace_existing},
+        ) as span:
+            active_docs, paths, runtime_cfg = self.refresh_combined_artifacts(kb)
+            if document is None or document.get("status") != "active":
+                if not active_docs:
+                    self._clear_bm25_artifacts(paths)
+                    await self._drop_collection(kb)
+                    span.annotate(mode="drop_collection")
+                    return "drop_collection"
+                await self.rebuild_kb(kb=kb)
+                span.annotate(mode="full_rebuild")
+                return "full_rebuild"
 
-        try:
-            if replace_existing:
-                await self._delete_document_from_index(
+            try:
+                if replace_existing:
+                    await self._delete_document_from_index(
+                        kb=kb,
+                        doc_key=str(document["doc_key"]),
+                    )
+                await self._index_documents_incremental(
                     kb=kb,
-                    doc_key=str(document["doc_key"]),
+                    documents=[document],
+                    runtime_cfg=runtime_cfg,
                 )
-            await self._index_documents_incremental(
-                kb=kb,
-                documents=[document],
-                runtime_cfg=runtime_cfg,
-            )
-            await self._build_bm25_index(
-                runtime_cfg=runtime_cfg,
-                corpus_path=runtime_cfg["corpus_path"],
-                overwrite=True,
-            )
-            return "incremental"
-        except Exception as exc:
-            logger.warning(
-                "[kb_admin] Incremental index failed for %s, fallback to full rebuild: %s",
-                document.get("source_uri"),
-                exc,
-            )
-            await self.rebuild_kb(kb=kb)
-            return "full_rebuild"
+                await self._build_bm25_index(
+                    runtime_cfg=runtime_cfg,
+                    corpus_path=runtime_cfg["corpus_path"],
+                    overwrite=True,
+                )
+                span.annotate(mode="incremental")
+                return "incremental"
+            except Exception as exc:
+                logger.warning(
+                    "[kb_admin] Incremental index failed for %s, fallback to full rebuild: %s",
+                    document.get("source_uri"),
+                    exc,
+                )
+                await self.rebuild_kb(kb=kb)
+                span.annotate(mode="full_rebuild")
+                return "full_rebuild"
 
     async def sync_documents_index_batch(
         self,
@@ -280,46 +307,54 @@ class KBIndexManager:
             return "full_rebuild"
 
     async def rebuild_kb(self, *, kb: Dict[str, Any]) -> Dict[str, Any]:
-        paths = combined_paths(kb)
-        active_docs = self._store.list_documents(kb["kb_id"], include_deleted=False)
+        async with observe_operation(
+            store=self._store,
+            component="index",
+            operation="rebuild_kb",
+            kb_id=str(kb["kb_id"]),
+        ) as span:
+            paths = combined_paths(kb)
+            active_docs = self._store.list_documents(kb["kb_id"], include_deleted=False)
 
-        write_jsonl(paths["corpus"], iter_jsonl_paths(active_docs, "corpus_path"))
-        write_jsonl(paths["chunk"], iter_jsonl_paths(active_docs, "chunk_path"))
+            write_jsonl(paths["corpus"], iter_jsonl_paths(active_docs, "corpus_path"))
+            write_jsonl(paths["chunk"], iter_jsonl_paths(active_docs, "chunk_path"))
 
-        active_doc_count = len(active_docs)
-        chunk_count = sum(1 for _ in iter_jsonl_paths(active_docs, "chunk_path"))
-        if chunk_count == 0:
-            self._clear_bm25_artifacts(paths)
-            await self._drop_collection(kb)
+            active_doc_count = len(active_docs)
+            chunk_count = sum(1 for _ in iter_jsonl_paths(active_docs, "chunk_path"))
+            if chunk_count == 0:
+                self._clear_bm25_artifacts(paths)
+                await self._drop_collection(kb)
+                span.annotate(documents=active_doc_count, chunks=0, dropped_collection=True)
+                return {
+                    "kb_id": kb["kb_id"],
+                    "collection_name": kb["collection_name"],
+                    "documents": active_doc_count,
+                    "chunks": 0,
+                    "dropped_collection": True,
+                }
+
+            runtime_cfg = self._runtime_cfg(kb)
+
+            await self._build_index(
+                runtime_cfg=runtime_cfg,
+                corpus_path=runtime_cfg["corpus_path"],
+                embedding_path=runtime_cfg["embedding_path"],
+                overwrite=True,
+                collection_name=kb["collection_name"],
+            )
+            await self._build_bm25_index(
+                runtime_cfg=runtime_cfg,
+                corpus_path=runtime_cfg["corpus_path"],
+                overwrite=True,
+            )
+            span.annotate(documents=active_doc_count, chunks=chunk_count)
             return {
                 "kb_id": kb["kb_id"],
                 "collection_name": kb["collection_name"],
                 "documents": active_doc_count,
-                "chunks": 0,
-                "dropped_collection": True,
+                "chunks": chunk_count,
+                "embedding_path": runtime_cfg["embedding_path"],
             }
-
-        runtime_cfg = self._runtime_cfg(kb)
-
-        await self._build_index(
-            runtime_cfg=runtime_cfg,
-            corpus_path=runtime_cfg["corpus_path"],
-            embedding_path=runtime_cfg["embedding_path"],
-            overwrite=True,
-            collection_name=kb["collection_name"],
-        )
-        await self._build_bm25_index(
-            runtime_cfg=runtime_cfg,
-            corpus_path=runtime_cfg["corpus_path"],
-            overwrite=True,
-        )
-        return {
-            "kb_id": kb["kb_id"],
-            "collection_name": kb["collection_name"],
-            "documents": active_doc_count,
-            "chunks": chunk_count,
-            "embedding_path": runtime_cfg["embedding_path"],
-        }
 
     async def _index_documents_incremental(
         self,

@@ -1,7 +1,7 @@
 # servers/retriever/parameter.yaml
 
-model_name_or_path: openbmb/MiniCPM-Embedding-Light
-retriever_model_name_or_path: openbmb/MiniCPM-Embedding-Light
+model_name_or_path: BAAI/bge-large-zh-v1.5
+retriever_model_name_or_path: BAAI/bge-large-zh-v1.5
 corpus_path: data/corpus_example.jsonl
 retriever_corpus_path: data/corpus_example.jsonl
 embedding_path: embedding/embedding.npy
@@ -19,6 +19,7 @@ backend_configs:
     trust_remote_code: true
   sentence_transformers:
     trust_remote_code: true
+    local_files_only: true
     sentence_transformers_encode:
       normalize_embeddings: false
       encode_chunk_size: 256
@@ -35,15 +36,15 @@ backend_configs:
     lang: en
     save_path: index/bm25
 
-index_backend: faiss # options: faiss, milvus
-retriever_index_backend: faiss
+index_backend: milvus # options: faiss, milvus
+retriever_index_backend: milvus
 index_backend_configs:
   faiss:
     index_use_gpu: True
     index_chunk_size: 10000
     index_path: index/index.index
   milvus:
-    uri: index/milvus_demo.db # Milvus Lite local file (or http://localhost:19530 for server)
+    uri: http://milvus:19530
     token: null
     id_field_name: id
     vector_field_name: vector
@@ -86,8 +87,8 @@ batch_size: 16
 retriever_batch_size: 16
 top_k: 5
 retrieval_top_k: 5
-gpu_ids: "1"
-retriever_gpu_ids: "1"
+gpu_ids: null
+retriever_gpu_ids: null
 query_instruction: ""
 is_multimodal: false
 retriever_is_multimodal: false

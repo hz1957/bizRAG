@@ -9,7 +9,7 @@ retriever:
         encode_chunk_size: 128
   index_backend_configs:
     milvus:
-      uri: ""
+      uri: http://127.0.0.1:19530
       id_max_length: 128
 
 reranker:

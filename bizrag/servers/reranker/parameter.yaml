@@ -6,18 +6,19 @@ backend_configs:
   infinity:
     bettertransformer: false
     pooling_method: auto
-    device: cuda
+    device: cpu
     model_warmup: false
     trust_remote_code: true
   sentence_transformers:
-    device: cuda
+    device: cpu
     trust_remote_code: true
+    local_files_only: true
   openai:
     model_name: text-embedding-3-small
     base_url: "https://api.openai.com/v1"
     api_key: ""
 
-gpu_ids: 0
+gpu_ids: null
 top_k: 5
 reranker_top_k: 5
 batch_size: 16

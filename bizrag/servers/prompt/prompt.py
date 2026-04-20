@@ -52,8 +52,7 @@ def _normalize_queries(q_ls: Any) -> List[str]:
     return [str(q_ls)]
 
 
-@app.tool(output="q_ls,ret_psg,template->prompt_ls")
-def qa_rag_boxed(
+def _build_prompts(
     q_ls: List[str],
     ret_psg: List[List[Any]],
     template: str,
@@ -81,6 +80,27 @@ def qa_rag_boxed(
             )
         )
     return {"prompt_ls": prompts}
+
+
+@app.tool(output="q_ls,ret_psg,template->prompt_ls")
+def qa_rag_boxed(
+    q_ls: List[str],
+    ret_psg: List[List[Any]],
+    template: str,
+) -> Dict[str, List[str]]:
+    return _build_prompts(q_ls=q_ls, ret_psg=ret_psg, template=template)
+
+
+@app.tool(output="q_ls,ret_psg->prompt_ls")
+def qa_rag(
+    q_ls: List[str],
+    ret_psg: List[List[Any]],
+) -> Dict[str, List[str]]:
+    return _build_prompts(
+        q_ls=q_ls,
+        ret_psg=ret_psg,
+        template="bizrag/prompt/qa_rag.jinja",
+    )
 
 
 if __name__ == "__main__":

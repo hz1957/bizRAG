@@ -135,7 +135,13 @@ services:
       BIZRAG_WORKSPACE_ROOT: /app/runtime/kbs
       BIZRAG_RUSTFS_TOKEN: ${BIZRAG_RUSTFS_TOKEN:-}
       BIZRAG_RUSTFS_SHARED_SECRET: ${BIZRAG_RUSTFS_SHARED_SECRET:-}
-      BIZRAG_HOT_RELOAD: ${BIZRAG_HOT_RELOAD:-true}
+      BIZRAG_ACCELERATOR: ${BIZRAG_ACCELERATOR:-cpu}
+      BIZRAG_GPU_IDS: ${BIZRAG_GPU_IDS:-}
+      BIZRAG_HF_OFFLINE: ${BIZRAG_HF_OFFLINE:-true}
+      BIZRAG_READ_WARMUP: ${BIZRAG_READ_WARMUP:-true}
+      BIZRAG_READ_WARMUP_MODE: ${BIZRAG_READ_WARMUP_MODE:-all}
+      BIZRAG_READ_WARMUP_KB_IDS: ${BIZRAG_READ_WARMUP_KB_IDS:-}
+      BIZRAG_HOT_RELOAD: ${BIZRAG_HOT_RELOAD:-false}
       BIZRAG_RUN_API: "true"
       BIZRAG_RUN_WORKER: "true"
       BIZRAG_RUN_MQ_BRIDGE: "true"
@@ -159,3 +165,42 @@ services:
       - ./output:/app/output
       - ./raw_knowledge:/app/raw_knowledge
       - ${HF_CACHE_DIR:-./runtime/hf_cache}:/app/.cache/huggingface
+
+  file_service:
+    build:
+      context: .
+      dockerfile: file_service/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FILE_SERVICE_HOST: 0.0.0.0
+      FILE_SERVICE_PORT: 8002
+      FILE_SERVICE_STORAGE_ROOT: /app/runtime/file_service/storage
+      FILE_SERVICE_DATABASE: /app/runtime/file_service/state/metadata.db
+      FILE_SERVICE_SOURCE_URI_PREFIX: filestore
+      FILE_SERVICE_BASE_URL: http://file_service:8002
+      FILE_SERVICE_DOWNLOAD_BASE_URL: http://file_service:8002
+      FILE_SERVICE_PUBLISHER_BACKEND: rabbitmq
+      FILE_SERVICE_RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672/
+      FILE_SERVICE_RABBITMQ_QUEUE: ${RUSTFS_RABBITMQ_QUEUE:-bizrag.rustfs.events}
+      FILE_SERVICE_POLL_INTERVAL: 2
+      FILE_SERVICE_BATCH_SIZE: 50
+      FILE_SERVICE_MAX_RETRY: 12
+      FILE_SERVICE_HTTP_TIMEOUT: 5
+      FILE_SERVICE_CORS: http://127.0.0.1:64501,http://127.0.0.1:3000
+      FILE_SERVICE_WATCH_ENABLED: "true"
+      FILE_SERVICE_WATCH_ROOT: /data/watch
+      FILE_SERVICE_WATCH_KB_ID: ${FILE_SERVICE_WATCH_KB_ID:-contracts_compose_auto}
+      FILE_SERVICE_WATCH_TENANT_ID: default
+      FILE_SERVICE_WATCH_RECURSIVE: "true"
+      FILE_SERVICE_WATCH_INITIAL_SCAN: "true"
+      FILE_SERVICE_WATCH_DEBOUNCE_SECONDS: 1.0
+      FILE_SERVICE_WATCH_DELETE_SYNC: "true"
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./runtime/file_service/storage:/app/runtime/file_service/storage
+      - ./runtime/file_service/state:/app/runtime/file_service/state
+      - ./runtime/file_service/watch:/data/watch

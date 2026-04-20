@@ -5,7 +5,8 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from bizrag.api.deps import get_read_service
+from bizrag.api.deps import get_read_service, require_admin
+from bizrag.common.observability import observe_operation
 from bizrag.contracts.schemas import (
     ExtractFieldResult,
     ExtractRequest,
@@ -32,24 +33,53 @@ def _model_to_dict(item: BaseModel) -> Dict[str, Any]:
 @router.get("/healthz")
 async def healthz(request: Request) -> Dict[str, str]:
     read_service = get_read_service(request)
+    retriever_status = read_service.health_status()
+    return {
+        "status": "ok" if retriever_status == "ready" else retriever_status,
+        "retriever": retriever_status,
+    }
+
+
+@router.get("/livez")
+async def livez(request: Request) -> Dict[str, str]:
+    read_service = get_read_service(request)
     return {
         "status": "ok",
         "retriever": read_service.health_status(),
     }
 
 
+@router.get("/readyz")
+async def readyz(request: Request) -> Dict[str, str]:
+    read_service = get_read_service(request)
+    retriever_status = read_service.health_status()
+    return {
+        "status": "ok" if retriever_status == "ready" else retriever_status,
+        "retriever": retriever_status,
+    }
+
+
 @router.post("/api/v1/retrieve", response_model=RetrieveResponse)
 async def retrieve(req: RetrieveRequest, request: Request) -> RetrieveResponse:
     read_service = get_read_service(request)
+    admin = require_admin(request)
     try:
-        items = await read_service.retrieve_items(
+        async with observe_operation(
+            store=admin.store,
+            component="api",
+            operation="retrieve_endpoint",
             kb_id=req.kb_id,
-            query=req.query,
-            top_k=req.top_k,
-            query_instruction=req.query_instruction,
-            filters=req.filters,
-        )
-        return RetrieveResponse(items=items)
+            details={"query": req.query, "top_k": req.top_k},
+        ) as span:
+            items = await read_service.retrieve_items(
+                kb_id=req.kb_id,
+                query=req.query,
+                top_k=req.top_k,
+                query_instruction=req.query_instruction,
+                filters=req.filters,
+            )
+            span.annotate(item_count=len(items))
+            return RetrieveResponse(items=items)
     except ServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except ValueError as exc:
@@ -61,16 +91,28 @@ async def retrieve(req: RetrieveRequest, request: Request) -> RetrieveResponse:
 @router.post("/api/v1/rag", response_model=RAGResponse)
 async def rag(req: RAGRequest, request: Request) -> RAGResponse:
     read_service = get_read_service(request)
+    admin = require_admin(request)
     try:
-        result = await read_service.generate_answer(
+        async with observe_operation(
+            store=admin.store,
+            component="api",
+            operation="rag_endpoint",
             kb_id=req.kb_id,
-            query=req.query,
-            top_k=req.top_k,
-            query_instruction=req.query_instruction,
-            filters=req.filters,
-            system_prompt=req.system_prompt,
-        )
-        return RAGResponse(**result)
+            details={"query": req.query, "top_k": req.top_k},
+        ) as span:
+            result = await read_service.generate_answer(
+                kb_id=req.kb_id,
+                query=req.query,
+                top_k=req.top_k,
+                query_instruction=req.query_instruction,
+                filters=req.filters,
+                system_prompt=req.system_prompt,
+            )
+            span.annotate(
+                citation_count=len(result.get("citations") or []),
+                answer_chars=len(str(result.get("answer") or "")),
+            )
+            return RAGResponse(**result)
     except ServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except ValueError as exc:
@@ -82,39 +124,52 @@ async def rag(req: RAGRequest, request: Request) -> RAGResponse:
 @router.post("/api/v1/extract", response_model=ExtractResponse)
 async def extract(req: ExtractRequest, request: Request) -> ExtractResponse:
     read_service = get_read_service(request)
+    admin = require_admin(request)
     try:
-        evidence_items = await read_service.retrieve_items(
+        async with observe_operation(
+            store=admin.store,
+            component="extract",
+            operation="extract_fields",
             kb_id=req.kb_id,
-            query=req.query,
-            top_k=req.top_k,
-            query_instruction=req.query_instruction,
-            filters=req.filters,
-        )
-        extraction = extract_fields(
-            fields=[_model_to_dict(field) for field in req.fields],
-            evidence_items=[_model_to_dict(item) for item in evidence_items],
-            max_evidence_per_field=req.max_evidence_per_field,
-        )
-        field_results = [
-            ExtractFieldResult(
-                name=str(item["name"]),
-                value=item.get("value"),
-                raw_value=item.get("raw_value"),
-                status=str(item.get("status") or "missing"),
-                confidence=float(item.get("confidence") or 0.0),
-                reason=str(item.get("reason") or ""),
-                evidence=[RetrieveItem(**evidence) for evidence in item.get("evidence", [])],
+            details={"query": req.query, "field_count": len(req.fields), "top_k": req.top_k},
+        ) as span:
+            evidence_items = await read_service.retrieve_items(
+                kb_id=req.kb_id,
+                query=req.query,
+                top_k=req.top_k,
+                query_instruction=req.query_instruction,
+                filters=req.filters,
             )
-            for item in extraction["field_results"]
-        ]
-        citations = [RetrieveItem(**item) for item in extraction["citations"]]
-        return ExtractResponse(
-            result=extraction["result"],
-            field_results=field_results,
-            citations=citations,
-            status=str(extraction["status"]),
-            missing_required_fields=list(extraction.get("missing_required_fields", [])),
-        )
+            extraction = extract_fields(
+                fields=[_model_to_dict(field) for field in req.fields],
+                evidence_items=[_model_to_dict(item) for item in evidence_items],
+                max_evidence_per_field=req.max_evidence_per_field,
+            )
+            field_results = [
+                ExtractFieldResult(
+                    name=str(item["name"]),
+                    value=item.get("value"),
+                    raw_value=item.get("raw_value"),
+                    status=str(item.get("status") or "missing"),
+                    confidence=float(item.get("confidence") or 0.0),
+                    reason=str(item.get("reason") or ""),
+                    evidence=[RetrieveItem(**evidence) for evidence in item.get("evidence", [])],
+                )
+                for item in extraction["field_results"]
+            ]
+            citations = [RetrieveItem(**item) for item in extraction["citations"]]
+            span.annotate(
+                evidence_count=len(evidence_items),
+                citation_count=len(citations),
+                missing_required=len(extraction.get("missing_required_fields", [])),
+            )
+            return ExtractResponse(
+                result=extraction["result"],
+                field_results=field_results,
+                citations=citations,
+                status=str(extraction["status"]),
+                missing_required_fields=list(extraction.get("missing_required_fields", [])),
+            )
     except ServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except ValueError as exc:

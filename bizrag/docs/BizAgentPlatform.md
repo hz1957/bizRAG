@@ -22,7 +22,7 @@
 - `bizrag.api`：承载 HTTP API 应用、路由、schema 和依赖装配
 - `bizrag.entrypoints.api_http`：作为 HTTP 进程入口，负责加载配置并启动 API 应用
 - `bizrag.entrypoints.kb_admin_cli`：对外暴露知识库注册、导入、删除、重建等管理命令
-- `bizrag.service.ultrarag.runner`：作为本地 UltraRAG pipeline 执行适配器
+- `bizrag.service.ultrarag.pipeline_runner`：作为本地 UltraRAG pipeline 执行适配器
 - `benchmark` / `evaluation`：支持基础离线评测
 - `bizrag.infra.metadata_store`：当前已支持 `SQLite / MySQL` 双后端，默认仍可用本地 `metadata.db`
 - `bizrag.contracts`：沉淀 API、worker、MQ bridge 共用的数据契约
@@ -45,7 +45,8 @@
 - MQ Bridge 进程入口：`bizrag.entrypoints.rustfs_mq_bridge_cli`
 - HTTP 应用实现：`bizrag.api`
 - 管理入口：`bizrag.entrypoints.kb_admin_cli`
-- Pipeline 执行适配：`bizrag.service.ultrarag.runner`
+- Pipeline 执行适配：`bizrag.service.ultrarag.pipeline_runner`
+- API 容器启动时会在生命周期里触发读取链路 warmup（可通过 `BIZRAG_READ_WARMUP` 控制），因此“第一次请求”默认通常不再承受首次 MCP/模型初始化开销。
 - 底层 server 根路径：`bizrag/servers/<name>`
 
 不再使用旧的 `bizrag.src.*` 作为公开调用路径。
@@ -866,7 +867,7 @@ Phase 4 当前归属：
   - 建立 CI/CD、smoke test、回归门禁
   - 建立灰度、回滚、版本兼容策略
 - 数据可靠性
-  - 补 SQLite / Milvus 数据备份恢复
+  - 补 mysql/Milvus 数据备份恢复
   - 增加索引一致性检查
   - 输出灾难恢复与运维 runbook
 
@@ -892,3 +893,26 @@ Phase 4 当前归属：
 - MySQL 库和账号由容器环境变量初始化，BizRAG 自己会在首次启动时自动建 metadata 表
 - `milvus` 作为独立向量检索组件
 - `rustfs` 服务在模板中以占位方式提供，需按实际环境替换 `RUSTFS_IMAGE`；默认放在 `rustfs` profile 下，不会在基础 compose 启动时自动拉起
+
+Phase 5 可观测性当前已落地的接口：
+
+- `GET /api/v1/admin/ops/health`
+  - 返回统一健康检查，覆盖 `metadata_store`、`read_service`、`rustfs_queue`
+  - 并汇总最近窗口内 `ingest`、`queue`、`worker`、`index`、`retrieve`、`extract` 的组件状态
+- `GET /api/v1/admin/ops/overview`
+  - 返回 inventory、component latency、active alerts、recent spans
+- `GET /api/v1/admin/ops/spans`
+  - 返回持久化 operation spans，可按 `component`、`kb_id`、`trace_id`、`status` 过滤
+- `GET /api/v1/admin/ops/metrics`
+  - 返回 Prometheus 风格 metrics
+- `GET /ops`
+  - 返回基于 overview API 的轻量级 web dashboard
+
+说明：
+
+- operation span 会落到 metadata store，因此 API、MQ bridge、worker 是跨进程统一可见的
+- 当前告警规则覆盖：
+  - 队列积压
+  - worker stalled
+  - retrieve/extract 高延迟
+  - 最近窗口失败操作

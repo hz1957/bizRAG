@@ -16,6 +16,7 @@ from urllib.request import urlopen
 from pydantic import BaseModel
 
 from bizrag.contracts.schemas import RustFSEventRequest
+from bizrag.common.observability import observe_operation
 from bizrag.common.errors import (
     BadRequestError,
     InternalServiceError,
@@ -318,13 +319,23 @@ async def handle_rustfs_event_request(
         admin.store.update_rustfs_event(event_id, status="running", result={})
 
     try:
-        result = await _process_rustfs_event(
-            req=req,
+        async with observe_operation(
+            store=admin.store,
+            component="worker",
+            operation="handle_rustfs_event",
+            kb_id=req.kb_id,
             event_id=event_id,
-            run_admin_async=run_admin_async,
-        )
-        admin.store.update_rustfs_event(event_id, status="success", result=result, error_message=None)
-        return result
+            source_uri=_event_source_uri(req),
+            details={"event_type": req.event_type.strip().lower(), "replay_of": replay_of},
+        ) as span:
+            result = await _process_rustfs_event(
+                req=req,
+                event_id=event_id,
+                run_admin_async=run_admin_async,
+            )
+            span.annotate(action=result.get("action"))
+            admin.store.update_rustfs_event(event_id, status="success", result=result, error_message=None)
+            return result
     except ServiceError as exc:
         admin.store.update_rustfs_event(
             event_id,
@@ -370,14 +381,23 @@ def enqueue_rustfs_event(
             "status": existing.get("status"),
         }
 
-    admin.store.create_rustfs_event(
-        event_id=event_id,
+    with observe_operation(
+        store=admin.store,
+        component="queue",
+        operation="enqueue_rustfs_event",
         kb_id=req.kb_id,
-        event_type=req.event_type.strip().lower(),
-        status="queued",
+        event_id=event_id,
         source_uri=_event_source_uri(req),
-        payload=_dump_model(req, exclude_none=True),
-    )
+        details={"event_type": req.event_type.strip().lower()},
+    ):
+        admin.store.create_rustfs_event(
+            event_id=event_id,
+            kb_id=req.kb_id,
+            event_type=req.event_type.strip().lower(),
+            status="queued",
+            source_uri=_event_source_uri(req),
+            payload=_dump_model(req, exclude_none=True),
+        )
     return {
         "event_id": event_id,
         "event_type": req.event_type.strip().lower(),

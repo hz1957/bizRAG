@@ -2,7 +2,6 @@ servers:
   custom: bizrag/servers/custom
   dense: bizrag/servers/retriever
   sparse: bizrag/servers/retriever
-  merge: bizrag/servers/custom
   reranker: bizrag/servers/reranker
 
 pipeline:
@@ -15,7 +14,7 @@ pipeline:
 - sparse.bm25_search_structured:
     output:
       ret_items: temp_items
-- merge.merge_retrieve_items:
+- custom.merge_retrieve_items:
     input:
       ret_items: ret_items
       temp_items: temp_items

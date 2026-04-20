@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from typing import Any, Dict, List, Optional, Union
 
@@ -12,6 +13,8 @@ app = UltraRAG_MCP_Server("reranker")
 
 class Reranker:
     def __init__(self, mcp_inst: UltraRAG_MCP_Server):
+        self._init_signature: Optional[tuple[Any, ...]] = None
+        self._inherited_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         mcp_inst.tool(
             self.reranker_init,
             output="model_name_or_path,backend_configs,batch_size,gpu_ids,backend->None",
@@ -27,6 +30,29 @@ class Reranker:
 
     def _drop_keys(self, d: Dict[str, Any], banned: List[str]) -> Dict[str, Any]:
         return {k: v for k, v in (d or {}).items() if k not in banned and v is not None}
+
+    def _restore_inherited_cuda_visible_devices(self) -> None:
+        if self._inherited_cuda_visible_devices is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = self._inherited_cuda_visible_devices
+
+    @staticmethod
+    def _build_init_signature(
+        *,
+        model_name_or_path: str,
+        backend_configs: Dict[str, Any],
+        batch_size: int,
+        gpu_ids: Optional[Union[str, int]],
+        backend: str,
+    ) -> tuple[Any, ...]:
+        return (
+            str(model_name_or_path),
+            str(backend or "").lower(),
+            int(batch_size),
+            "" if gpu_ids is None else str(gpu_ids),
+            json.dumps(backend_configs or {}, sort_keys=True, default=str),
+        )
 
     @staticmethod
     def _normalize_query_rows(
@@ -58,13 +84,29 @@ class Reranker:
         gpu_ids: Optional[Union[str, int]] = None,
         backend: str = "sentence_transformers",
     ) -> None:
+        init_signature = self._build_init_signature(
+            model_name_or_path=model_name_or_path,
+            backend_configs=backend_configs,
+            batch_size=batch_size,
+            gpu_ids=gpu_ids,
+            backend=backend,
+        )
+        if self._init_signature == init_signature:
+            app.logger.info(
+                "[reranker] Initialization skipped; configuration unchanged."
+            )
+            return
+
         self.backend = backend.lower()
         self.batch_size = batch_size
         self.backend_configs = backend_configs
 
         cfg = self.backend_configs.get(self.backend, {})
         gpu_ids_str = str(gpu_ids) if gpu_ids is not None else ""
-        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids_str
+        if gpu_ids is None:
+            self._restore_inherited_cuda_visible_devices()
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids_str
         self.device_num = len(gpu_ids_str.split(",")) if gpu_ids_str else 1
 
         if self.backend == "infinity":
@@ -117,6 +159,8 @@ class Reranker:
                 f"Unsupported backend: {backend}. "
                 "Supported backends: 'infinity', 'sentence_transformers', 'openai'"
             )
+
+        self._init_signature = init_signature
 
     async def _rank_documents(
         self,
