@@ -8,6 +8,7 @@ import hmac
 import json
 import mimetypes
 import os
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -110,6 +111,13 @@ def _dump_model(model: BaseModel, *, exclude_none: bool = False) -> Dict[str, An
     return model.dict(exclude_none=exclude_none)
 
 
+def _field_was_explicitly_set(model: BaseModel, field_name: str) -> bool:
+    fields_set = getattr(model, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(model, "__fields_set__", set())
+    return field_name in fields_set
+
+
 def _pick_first(*values: Optional[str]) -> Optional[str]:
     for value in values:
         if value:
@@ -128,6 +136,42 @@ def _is_existing_local_path(value: Optional[str]) -> bool:
     if not value:
         return False
     return Path(value).exists()
+
+
+def _looks_like_pdf_content_type(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    return value.split(";", 1)[0].strip().lower() == "application/pdf"
+
+
+def _looks_like_pdf_path(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    suffix = Path(urlparse(str(value)).path).suffix.lower()
+    return suffix == ".pdf"
+
+
+def _resolve_prefer_mineru(req: RustFSEventRequest) -> bool:
+    if _field_was_explicitly_set(req, "prefer_mineru"):
+        return bool(req.prefer_mineru)
+
+    if shutil.which("mineru") is None:
+        return False
+
+    if _looks_like_pdf_content_type(req.content_type):
+        return True
+
+    candidates = (
+        req.file_name,
+        req.new_source_uri,
+        req.source_uri,
+        req.old_source_uri,
+        req.new_payload_path,
+        req.payload_path,
+        req.old_payload_path,
+        req.download_url,
+    )
+    return any(_looks_like_pdf_path(candidate) for candidate in candidates)
 
 
 def _infer_temp_suffix(req: RustFSEventRequest) -> str:
@@ -235,6 +279,7 @@ async def _process_rustfs_event(
     temp_path: Optional[Path] = None
     try:
         if event_type in {"document.created", "document.updated"}:
+            prefer_mineru = _resolve_prefer_mineru(req)
             local_path = _pick_first(
                 req.new_payload_path if _is_existing_local_path(req.new_payload_path) else None,
                 req.payload_path if _is_existing_local_path(req.payload_path) else None,
@@ -258,7 +303,7 @@ async def _process_rustfs_event(
                 logical_source_uri=logical_source_uri,
                 logical_file_name=logical_file_name,
                 force=req.force,
-                prefer_mineru=req.prefer_mineru,
+                prefer_mineru=prefer_mineru,
             )
             return {
                 "event_id": event_id,
@@ -302,6 +347,7 @@ async def _process_rustfs_event(
             }
 
         if event_type == "document.renamed":
+            prefer_mineru = _resolve_prefer_mineru(req)
             old_source = _pick_first(req.old_source_uri, req.old_payload_path, req.source_uri)
             local_path = _pick_first(
                 req.new_payload_path if _is_existing_local_path(req.new_payload_path) else None,
@@ -333,7 +379,7 @@ async def _process_rustfs_event(
                     Path(target_path).name,
                 ),
                 force=req.force,
-                prefer_mineru=req.prefer_mineru,
+                prefer_mineru=prefer_mineru,
             )
             return {
                 "event_id": event_id,

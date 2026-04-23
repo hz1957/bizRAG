@@ -739,9 +739,12 @@ async def mineru_parse(
     os.makedirs(out_root, exist_ok=True)
 
     extra_args: List[str] = []
-    if mineru_extra_params:
-        for k in sorted(mineru_extra_params.keys()):
-            v = mineru_extra_params[k]
+    resolved_mineru_extra_params = dict(mineru_extra_params or {})
+    # MinerU's CPU-friendly pipeline backend is the safest default in containerized deployments.
+    resolved_mineru_extra_params.setdefault("backend", "pipeline")
+    if resolved_mineru_extra_params:
+        for k in sorted(resolved_mineru_extra_params.keys()):
+            v = resolved_mineru_extra_params[k]
             extra_args.append(f"--{k}")
             if v is not None and v != "":
                 extra_args.append(str(v))
