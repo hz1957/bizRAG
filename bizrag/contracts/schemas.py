@@ -101,7 +101,7 @@ class ExtractResponse(BaseModel):
 
 class RegisterKBRequest(BaseModel):
     kb_id: str
-    retriever_config: str
+    source_parameters_path: str
     collection_name: Optional[str] = None
     display_name: Optional[str] = None
     source_root: Optional[str] = None
@@ -114,9 +114,6 @@ class IngestPathRequest(BaseModel):
     sync_deletions: bool = False
     force: bool = False
     prefer_mineru: bool = False
-    chunk_backend: str = "sentence"
-    chunk_size: int = 512
-    chunk_overlap: int = 50
 
 
 class DeleteDocumentRequest(BaseModel):
@@ -149,9 +146,6 @@ class RustFSEventRequest(BaseModel):
     sync_deletions: bool = False
     force: bool = False
     prefer_mineru: bool = False
-    chunk_backend: str = "sentence"
-    chunk_size: int = 512
-    chunk_overlap: int = 50
 
 
 class RustFSEventBatchRequest(BaseModel):

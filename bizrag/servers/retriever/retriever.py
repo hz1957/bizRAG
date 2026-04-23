@@ -1171,18 +1171,19 @@ class Retriever:
         self,
         collection_name: str,
         filter_expr: str,
-    ) -> int:
+    ) -> Dict[str, int]:
         if self.index_backend is None:
             raise RuntimeError("Index backend is not initialized.")
         if not filter_expr:
             raise ValidationError("filter_expr is required")
         try:
-            return int(
+            deleted_count = int(
                 self.index_backend.delete_by_filter(
                     collection_name=collection_name,
                     filter_expr=filter_expr,
                 )
             )
+            return {"deleted_count": deleted_count}
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
 

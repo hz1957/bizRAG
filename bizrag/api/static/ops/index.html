@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <title>bizRAG Ops Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="/ops-assets/style.css">
+  <link rel="stylesheet" href="/ops-assets/style.css?v=20260421-ops7">
 </head>
 <body>
   <div class="wrap">
@@ -16,27 +16,46 @@
       <div class="pill" id="health-pill">health</div>
     </div>
 
-    <div class="grid" id="inventory-grid"></div>
+    <div class="tab-bar" id="ops-tab-bar">
+      <button type="button" class="tab-chip is-active" data-tab-button="overview" onclick="switchOpsTab('overview')">Overview</button>
+      <button type="button" class="tab-chip" data-tab-button="activity" onclick="switchOpsTab('activity')">Activity</button>
+      <button type="button" class="tab-chip" data-tab-button="query" onclick="switchOpsTab('query')">Query</button>
+      <button type="button" class="tab-chip" data-tab-button="files" onclick="switchOpsTab('files')">Files</button>
+    </div>
 
-    <div class="card section">
+    <div class="grid" id="inventory-grid" data-tab-panel="overview"></div>
+
+    <div class="card section" data-tab-panel="overview">
       <h2>Alerts</h2>
       <div class="alerts" id="alerts"></div>
     </div>
 
-    <div class="card section">
-      <h2>Component Health</h2>
+    <div class="card section" data-tab-panel="overview">
+      <h2>Runtime Health</h2>
+      <div class="sub">Healthy means the area is available and has recent successful work. Active means fresh work is in flight. Stalled means metadata still says running, but it has exceeded the live-work threshold.</div>
       <div class="health-grid" id="health-grid"></div>
     </div>
 
-    <div class="card section">
-      <h2>Component Metrics</h2>
+    <div class="card section" data-tab-panel="overview">
+      <h2>KB Activity</h2>
+      <div class="sub">What each KB is doing now. Active stages come from fresh running spans; stalled stages are old running metadata that likely needs attention.</div>
+      <div class="scroll-panel kb-panel">
+          <table>
+          <thead><tr><th>KB</th><th>Docs</th><th>Active / Stalled Stages</th><th>KB Tasks / Events</th><th>Latest Activity</th><th>Latest Failure</th><th></th></tr></thead>
+          <tbody id="kb-activity"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card section" data-tab-panel="activity">
+      <h2>Area Metrics</h2>
       <table>
-        <thead><tr><th>Component</th><th>Status Counts</th><th>P50 ms</th><th>P95 ms</th><th>Max ms</th></tr></thead>
+        <thead><tr><th>Area</th><th>Latest</th><th>Status Counts</th><th>P50 ms</th><th>P95 ms</th><th>Max ms</th></tr></thead>
         <tbody id="component-metrics"></tbody>
       </table>
     </div>
 
-    <div class="card section">
+    <div class="card section" data-tab-panel="activity">
       <h2>Recent Spans</h2>
       <div class="scroll-panel spans-panel">
         <table>
@@ -46,7 +65,7 @@
       </div>
     </div>
 
-    <div class="card section">
+    <div class="card section" data-tab-panel="query">
       <h2>Query Console</h2>
       <div class="sub">Send live retrieve or RAG requests against the running container service.</div>
       <div class="input-row">
@@ -70,7 +89,7 @@
       </div>
     </div>
 
-    <div class="card section">
+    <div class="card section" data-tab-panel="files">
       <h2>Data Tools</h2>
       <div class="sub">Open raw health, overview, metrics, and file inventory in a modal when needed.</div>
       <div class="toolbar compact">
@@ -81,7 +100,7 @@
       </div>
     </div>
 
-    <div class="card section">
+    <div class="card section" data-tab-panel="files">
       <h2>File Service Inventory</h2>
       <div class="sub">File service files mapped to UltraRAG chunk ids and Milvus vector ids.</div>
       <div id="file-service-summary" class="sub" style="margin-top:8px;"></div>
@@ -100,6 +119,22 @@
       </div>
       <div class="modal-body">
         <div class="raw-panel"><pre id="raw-modal-content"></pre></div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="inspector-modal" class="raw-modal">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h3 id="inspector-title">Details</h3>
+        <button type="button" onclick="closeInspectorModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div id="inspector-summary" class="inspector-summary"></div>
+        <div class="span-section">
+          <div class="sub">Raw Details</div>
+          <div class="raw-panel"><pre id="inspector-raw"></pre></div>
+        </div>
       </div>
     </div>
   </dialog>
@@ -146,6 +181,6 @@
     </div>
   </dialog>
 
-  <script src="/ops-assets/app.js"></script>
+  <script src="/ops-assets/app.js?v=20260421-ops7"></script>
 </body>
 </html>

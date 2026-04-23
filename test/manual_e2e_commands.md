@@ -24,7 +24,7 @@ docker exec bizrag-bizrag-1 python -m pip install --no-cache-dir openpyxl
 ```bash
 curl -s -X POST "$BIZRAG_API/api/v1/admin/kbs/register" \
   -H "Content-Type: application/json" \
-  -d "{\"kb_id\":\"$KB_ID\",\"retriever_config\":\"/app/bizrag/servers/retriever/parameter.docker.yaml\",\"collection_name\":\"$KB_ID\"}"
+  -d "{\"kb_id\":\"$KB_ID\",\"source_parameters_path\":\"/app/bizrag/servers/retriever/parameter.docker.yaml\",\"collection_name\":\"$KB_ID\"}"
 ```
 
 4. 用 `file_service` 上传一个文件（`xlsx`）：

@@ -1,12 +1,49 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import logging
 import os
 
 import uvicorn
+from uvicorn.config import LOGGING_CONFIG
 
 from bizrag.api.app import fastapi_app
 from bizrag.api.deps import configure_api, env_flag
+
+
+QUIET_ACCESS_PATH_PREFIXES = (
+    "/ops",
+    "/ops-assets/",
+    "/api/v1/admin/ops/",
+    "/api/v1/admin/kbs",
+    "/healthz",
+)
+
+
+class QuietAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = getattr(record, "args", ())
+        if len(args) >= 3:
+            path = str(args[2] or "")
+            if any(path.startswith(prefix) for prefix in QUIET_ACCESS_PATH_PREFIXES):
+                return False
+        return True
+
+
+def _uvicorn_log_config() -> dict:
+    config = copy.deepcopy(LOGGING_CONFIG)
+    config.setdefault("filters", {})
+    config["filters"]["quiet_access"] = {
+        "()": "bizrag.entrypoints.api_http.QuietAccessLogFilter",
+    }
+    access_handler = config.get("handlers", {}).get("access")
+    if isinstance(access_handler, dict):
+        filters = list(access_handler.get("filters", []))
+        if "quiet_access" not in filters:
+            filters.append("quiet_access")
+        access_handler["filters"] = filters
+    return config
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,7 +94,13 @@ def main() -> None:
         read_warmup_mode=str(os.environ.get("BIZRAG_READ_WARMUP_MODE", "all") or "all"),
         read_warmup_kb_ids=warmup_kb_ids,
     )
-    uvicorn.run(fastapi_app, host=args.host, port=args.port, reload=False)
+    uvicorn.run(
+        fastapi_app,
+        host=args.host,
+        port=args.port,
+        reload=False,
+        log_config=_uvicorn_log_config(),
+    )
 
 
 if __name__ == "__main__":

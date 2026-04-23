@@ -3,18 +3,15 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
-from bizrag.common.io_utils import dump_yaml, load_yaml
 from bizrag.service.app.kb_artifacts import combined_paths
 from bizrag.service.ultrarag.server_parameters import (
-    normalize_server_parameters,
+    deep_merge_dicts,
     merge_with_default_server_parameters,
     load_server_parameters,
 )
 
-MATERIALIZED_SERVER_PARAMETERS_FILE = Path("config/server_parameters.yaml")
-LEGACY_RETRIEVER_RUNTIME_FILE = Path("index/retriever_runtime.yaml")
 LEGACY_MINICPM_EMBEDDING_MODEL = "openbmb/MiniCPM-Embedding-Light"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
 DEFAULT_RUNTIME_ACCELERATOR = "auto"
@@ -90,7 +87,7 @@ def _apply_runtime_accelerator_profile(materialized: Dict[str, Any]) -> None:
         materialized["reranker"] = reranker_cfg
 
 
-def _build_materialized_server_parameters(
+def build_runtime_server_parameters(
     *,
     source_parameters: Dict[str, Any],
     workspace_dir: str | Path,
@@ -137,90 +134,147 @@ def _build_materialized_server_parameters(
     return materialized
 
 
-def build_kb_server_parameters(
+def _resolve_runtime_source_path(
+    kb: Mapping[str, Any],
     *,
-    source_parameters_path: str | Path,
-    workspace_dir: str | Path,
-    collection_name: str,
-    index_uri: str,
-) -> Dict[str, Any]:
-    return _build_materialized_server_parameters(
-        source_parameters=load_server_parameters(source_parameters_path),
-        workspace_dir=workspace_dir,
-        collection_name=collection_name,
-        index_uri=index_uri,
-    )
-
-
-def materialize_kb_server_parameters(
-    *,
-    source_parameters_path: str | Path,
-    workspace_dir: str | Path,
-    collection_name: str,
-    index_uri: str,
+    source_parameters_path: str | Path | None = None,
 ) -> Path:
-    workspace_path = Path(workspace_dir).resolve()
-    config_path = workspace_path / MATERIALIZED_SERVER_PARAMETERS_FILE
-    dump_yaml(
-        config_path,
-        build_kb_server_parameters(
-            source_parameters_path=source_parameters_path,
-            workspace_dir=workspace_path,
-            collection_name=collection_name,
-            index_uri=index_uri,
-        ),
-    )
-    return config_path
+    configured_path = str(source_parameters_path or kb.get("source_parameters_path") or "").strip()
+    if not configured_path:
+        raise RuntimeError(
+            f"KB {kb.get('kb_id')} is missing source_parameters_path."
+        )
+    return Path(configured_path).resolve()
 
 
-def load_kb_server_parameters(path: str | Path) -> Dict[str, Any]:
-    return normalize_server_parameters(load_yaml(path))
-
-
-def load_kb_retriever_parameters(path: str | Path) -> Dict[str, Any]:
-    return deepcopy(load_kb_server_parameters(path).get("retriever") or {})
-
-
-def migrate_kb_server_parameters(
+def load_kb_source_server_parameters(
     *,
-    kb: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    workspace_path = Path(str(kb["workspace_dir"])).resolve()
-    materialized_path = workspace_path / MATERIALIZED_SERVER_PARAMETERS_FILE
-    legacy_runtime_path = workspace_path / LEGACY_RETRIEVER_RUNTIME_FILE
-    configured_path = Path(str(kb["retriever_config_path"]))
+    kb: Mapping[str, Any],
+    source_parameters_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    source_path = _resolve_runtime_source_path(
+        kb,
+        source_parameters_path=source_parameters_path,
+    )
+    return load_server_parameters(source_path)
 
-    source_path: Optional[Path] = None
-    for candidate in (configured_path, legacy_runtime_path, materialized_path):
-        if candidate.exists():
-            source_path = candidate
-            break
-    if source_path is None:
-        return None
 
-    retriever_cfg = normalize_server_parameters(load_yaml(source_path)).get("retriever") or {}
+def resolve_kb_runtime_paths(*, kb: Mapping[str, Any]) -> Dict[str, str]:
+    workspace_dir = str(Path(str(kb["workspace_dir"])).resolve())
+    paths = combined_paths({"workspace_dir": workspace_dir})
+    return {
+        "workspace_dir": workspace_dir,
+        "chunk_path": str(paths["chunk"]),
+        "embedding_path": str(paths["embedding"]),
+        "bm25_path": str(paths["bm25"]),
+        "faiss_index_path": str(paths["faiss_index"]),
+    }
+
+
+def _resolve_kb_index_uri(
+    *,
+    kb: Mapping[str, Any],
+    source_parameters: Mapping[str, Any],
+) -> str:
+    retriever_cfg = deepcopy(source_parameters.get("retriever") or {})
     milvus_cfg = retriever_cfg.get("index_backend_configs", {}).get("milvus", {})
     resolved_index_uri = kb.get("index_uri")
     if str(retriever_cfg.get("index_backend") or "").lower() == "milvus":
         resolved_index_uri = milvus_cfg.get("uri") or resolved_index_uri
         if not resolved_index_uri:
             raise RuntimeError(
-                f"KB {kb['kb_id']} uses milvus backend but retriever.index_backend_configs.milvus.uri is not configured"
+                f"KB {kb.get('kb_id')} uses milvus backend but retriever.index_backend_configs.milvus.uri is not configured"
             )
-    resolved_index_uri = str(resolved_index_uri or "")
-    materialized = _build_materialized_server_parameters(
-        source_parameters=load_yaml(source_path),
-        workspace_dir=workspace_path,
-        collection_name=str(kb["collection_name"]),
-        index_uri=resolved_index_uri,
+    return str(resolved_index_uri or "")
+
+
+def resolve_kb_runtime_overrides(
+    *,
+    kb: Mapping[str, Any],
+    source_parameters: Optional[Mapping[str, Any]] = None,
+    source_parameters_path: str | Path | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    resolved_source_parameters = deepcopy(
+        source_parameters
+        or load_kb_source_server_parameters(
+            kb=kb,
+            source_parameters_path=source_parameters_path,
+        )
     )
-    dump_yaml(materialized_path, materialized)
+    runtime_paths = resolve_kb_runtime_paths(kb=kb)
+    resolved_index_uri = _resolve_kb_index_uri(
+        kb=kb,
+        source_parameters=resolved_source_parameters,
+    )
     return {
-        "kb_id": str(kb["kb_id"]),
-        "collection_name": str(kb["collection_name"]),
-        "display_name": kb.get("display_name"),
-        "source_root": kb.get("source_root"),
-        "workspace_dir": str(workspace_path),
-        "retriever_config_path": str(materialized_path),
-        "index_uri": resolved_index_uri,
+        "retriever": {
+            "corpus_path": runtime_paths["chunk_path"],
+            "embedding_path": runtime_paths["embedding_path"],
+            "collection_name": str(kb["collection_name"]),
+            "index_backend": "milvus",
+            "retriever_index_backend": "milvus",
+            "backend_configs": {
+                "bm25": {
+                    "save_path": runtime_paths["bm25_path"],
+                }
+            },
+            "index_backend_configs": {
+                "faiss": {
+                    "index_path": runtime_paths["faiss_index_path"],
+                },
+                "milvus": {
+                    "uri": resolved_index_uri,
+                },
+            },
+        }
     }
+
+
+def resolve_kb_server_parameters(
+    *,
+    kb: Mapping[str, Any],
+    source_parameters_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    source_parameters = load_kb_source_server_parameters(
+        kb=kb,
+        source_parameters_path=source_parameters_path,
+    )
+    materialized = merge_with_default_server_parameters(source_parameters)
+    runtime_overrides = resolve_kb_runtime_overrides(
+        kb=kb,
+        source_parameters=source_parameters,
+    )
+
+    retriever_cfg = deep_merge_dicts(
+        deepcopy(materialized.get("retriever") or {}),
+        deepcopy(runtime_overrides.get("retriever") or {}),
+    )
+    retriever_cfg["model_name_or_path"] = _canonicalize_hf_model_name_or_path(
+        retriever_cfg.get("model_name_or_path")
+    )
+    retriever_cfg["retriever_model_name_or_path"] = retriever_cfg["model_name_or_path"]
+    materialized["retriever"] = retriever_cfg
+
+    reranker_cfg = deepcopy(materialized.get("reranker") or {})
+    if reranker_cfg:
+        reranker_cfg["model_name_or_path"] = _canonicalize_hf_model_name_or_path(
+            reranker_cfg.get("model_name_or_path")
+        )
+        materialized["reranker"] = reranker_cfg
+
+    _apply_runtime_accelerator_profile(materialized)
+    return materialized
+
+
+def resolve_kb_retriever_parameters(
+    *,
+    kb: Mapping[str, Any],
+    source_parameters_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    return deepcopy(
+        resolve_kb_server_parameters(
+            kb=kb,
+            source_parameters_path=source_parameters_path,
+        ).get("retriever")
+        or {}
+    )

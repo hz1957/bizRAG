@@ -166,6 +166,33 @@ class MetadataStore:
             return None
         return FileRecord(**dict(row))
 
+    def list_files(
+        self,
+        *,
+        kb_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[FileRecord]:
+        sql = """
+            SELECT file_id, tenant_id, kb_id, source_uri, current_version, file_name,
+                   content_type, status, created_at, updated_at, deleted_at
+            FROM files
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if kb_id is not None:
+            sql += " AND kb_id = ?"
+            params.append(kb_id)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY updated_at DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, int(limit)))
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [FileRecord(**dict(row)) for row in rows]
+
     def latest_version(self, file_id: str) -> Optional[VersionRecord]:
         row = self._conn.execute(
             """

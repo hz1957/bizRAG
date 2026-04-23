@@ -35,7 +35,7 @@
 - **说明**：`service/app` 负责平台状态与业务语义，`service/ultrarag` 负责极薄的 UltraRAG 调用适配；写链路不应直接 import `servers` 执行业务动作。
 ##### ultrarag/pipeline_runner.py
 - **职能**：UltraRAG pipeline 执行适配器。
-- **说明**：负责定位 `bizrag/pipelines/*.yaml` 与 companion `bizrag/pipelines/server/*_server.yaml`，生成参数文件并调用 `PipelineCall`。
+- **说明**：负责定位 `bizrag/pipelines/*.yaml`，加载 `servers/*/server.yaml` 作为 server/tool 基础定义，并执行 pipeline 中声明的 step 级 `input/output` override。
 ##### app/kb_admin.py
 - **职能**：知识库管理员核心业务对象。提供创立知识库、接收文件导入指令、触发入库与全文向量索引重建的逻辑。
 - **说明**：当前已按 `pipeline-first` 收敛，CLI 启动逻辑已迁到 `bizrag/entrypoints/kb_admin_cli.py`，索引编排已拆到 `app/kb_indexer.py`。
@@ -51,10 +51,10 @@
 - **职能**：在线检索应用服务。
 - **说明**：只负责把 HTTP 读请求交给 `retrieve_classic` / `rag_answer` pipeline，并把结果转回契约对象。
 ##### app/kb_config.py
-- **职能**：物化 KB 专属最终 server 配置，并提供 KB 配置读取工具。
-- **说明**：`register-kb` 时会把 workspace 路径、collection、index URI 写入 KB 自己的最终 YAML，运行时不再做默认参数继承。
+- **职能**：基于全局默认 server 参数和 KB 元数据，动态解析运行时 server 配置。
+- **说明**：`register-kb` 仅保存源参数路径与 KB 路由信息；运行时再补齐 workspace 路径、collection、index URI 等字段，不再为每个 KB 物化最终 YAML。
 ##### ultrarag/server_parameters.py
-- **职能**：加载 server 默认参数并解析 `base_config` 覆盖，供 KB 配置物化阶段使用。
+- **职能**：加载 server 默认参数并解析 `base_config` 覆盖，供 KB 运行时配置解析使用。
 ##### ultrarag/read_pipeline_payload.py
 - **职能**：把 KB 最终参数和读请求输入组装成 `retrieve_classic` / `rag_answer` 的 pipeline payload。
 ##### app/rustfs_events.py
@@ -78,7 +78,15 @@
 - **职能**：承载数据库、消息系统等基础设施适配实现。
 ##### metadata_store.py
 - **职能**：知识库元数据库操作层。记录 KB、文档、任务和 RustFS 事件状态，管理防重入库和事件补偿的幂等逻辑。
-- **说明**：当前已支持 `SQLite / MySQL` 双后端；默认仍可使用本地 `metadata.db`，Phase 5 可切到 MySQL 作为正式控制面存储。
+- **说明**：当前已支持 `SQLite / MySQL` 双后端；默认仍可使用本地 `metadata.db`，Phase 5 可切到 MySQL 作为正式控制面存储。schema 与历史配置迁移逻辑已拆到 `bizrag/migrations/*`。
+
+### migrations (迁移与兼容收敛层)
+- **职能**：承载一次性 schema 迁移、历史配置回收和遗留运行时文件清理逻辑。
+- **说明**：避免把历史兼容代码继续堆在 `MetadataStore` 或 `kb_config` 里，迁移完成后可以整块删除。
+##### knowledge_bases.py
+- **职能**：负责 `knowledge_bases` 表 schema 迁移、历史 `source_parameters_path` 回收，以及已脱离引用的 legacy runtime config 清理。
+##### source_parameters.py
+- **职能**：负责从历史 materialized runtime config 反推出真正的 `parameter*.yaml` 源配置路径。
 
 ### common (共享基础工具)
 - **职能**：承载跨层复用的时间、IO 和通用异常定义。
@@ -193,7 +201,7 @@
 
 5. 新增写链路功能时的默认顺序
    - 先补 `pipelines/*.yaml`
-   - 再补对应 `servers/*` 或 pipeline companion 的参数适配
+   - 再补对应 `servers/*` 或 pipeline step 的参数适配
    - 最后由 `service` 接入
 
 ---

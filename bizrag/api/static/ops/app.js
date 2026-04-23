@@ -8,6 +8,13 @@ const rawPayloads = {
 let currentFileInventory = { items: [] };
 let currentKbItems = [];
 let currentRecentSpans = [];
+let currentOverview = null;
+let currentAlerts = [];
+let currentHealthChecks = [];
+let currentKbActivity = [];
+let currentOpsTab = "overview";
+
+const OPS_TABS = new Set(["overview", "activity", "query", "files"]);
 
 function esc(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -15,6 +22,12 @@ function esc(value) {
 
 function badgeClass(status) {
   return `status-${status || "idle"}`;
+}
+
+function titleCase(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function compact(value, limit = 72) {
@@ -33,6 +46,22 @@ function formatDuration(value) {
   return `${ms.toFixed(1)} ms`;
 }
 
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let current = bytes;
+  let idx = 0;
+  while (current >= 1024 && idx < units.length - 1) {
+    current /= 1024;
+    idx += 1;
+  }
+  const digits = idx === 0 ? 0 : current >= 10 ? 1 : 2;
+  return `${current.toFixed(digits)} ${units[idx]}`;
+}
+
 function formatAlertValue(item) {
   const ruleId = String(item?.rule_id || "");
   if (ruleId === "retrieve_latency_high" || ruleId === "extract_latency_high") {
@@ -45,6 +74,221 @@ function formatAlertValue(item) {
   return String(item?.value ?? "");
 }
 
+function formatTs(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  return text.replace("T", " ").replace("+00:00", "Z");
+}
+
+function formatAgeSeconds(value) {
+  const seconds = Number(value || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "just now";
+  }
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s ago`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m ago`;
+  }
+  if (seconds < 86400) {
+    return `${(seconds / 3600).toFixed(1)}h ago`;
+  }
+  return `${(seconds / 86400).toFixed(1)}d ago`;
+}
+
+function sumValues(obj) {
+  return Object.values(obj || {}).reduce((total, value) => total + Number(value || 0), 0);
+}
+
+function renderStageBadges(values) {
+  const items = Array.isArray(values) ? values : [];
+  if (!items.length) {
+    return '<span class="sub">idle</span>';
+  }
+  return `<div class="mini-badges">${items.map((item) => `<span class="mini-badge">${esc(item)}</span>`).join("")}</div>`;
+}
+
+function renderLiveOps(values, emptyLabel = "No running operations") {
+  const items = Array.isArray(values) ? values : [];
+  if (!items.length) {
+    return `<span class="sub">${esc(emptyLabel)}</span>`;
+  }
+  return `<div class="live-ops">${items.map((item) => `
+    <div class="live-op">
+      <div class="live-op-head">
+        <span>${esc(item.stage || item.component_label || item.component || "")}</span>
+        <span class="${badgeClass(item.activity_state || item.status)}">${esc(titleCase(item.activity_state || item.status || ""))}</span>
+      </div>
+      <div class="sub">${esc(item.component_label || item.component || "")} · ${esc(item.operation || "")}</div>
+      <div class="sub">${esc(formatTs(item.started_at || ""))} · ${esc(formatAgeSeconds(item.age_seconds || 0))}</div>
+      ${renderProgressItems(item.progress_items)}
+    </div>
+  `).join("")}</div>`;
+}
+
+function renderProgressItems(values) {
+  const items = Array.isArray(values) ? values : [];
+  if (!items.length) {
+    return "";
+  }
+  return `<div class="progress-items">${items.map((item) => {
+    let valueText = "";
+    if (item.key === "file_size_bytes" || item.key === "total_bytes") {
+      valueText = formatBytes(item.value);
+    } else if (item.key === "processed_bytes" && item.value && typeof item.value === "object") {
+      valueText = `${formatBytes(item.value.processed)} / ${formatBytes(item.value.total)}`;
+    } else {
+      valueText = String(item.value ?? "");
+    }
+    return `<div class="progress-item"><strong>${esc(item.label || item.key || "")}</strong><span>${esc(valueText)}</span></div>`;
+  }).join("")}</div>`;
+}
+
+function switchOpsTab(tab) {
+  const nextTab = OPS_TABS.has(tab) ? tab : "overview";
+  currentOpsTab = nextTab;
+  for (const button of document.querySelectorAll("[data-tab-button]")) {
+    button.classList.toggle("is-active", button.getAttribute("data-tab-button") === nextTab);
+  }
+  for (const panel of document.querySelectorAll("[data-tab-panel]")) {
+    panel.hidden = panel.getAttribute("data-tab-panel") !== nextTab;
+  }
+  try {
+    window.localStorage.setItem("bizrag.ops.tab", nextTab);
+  } catch (_err) {
+  }
+}
+
+function preferredOpsTab() {
+  try {
+    const stored = window.localStorage.getItem("bizrag.ops.tab");
+    if (OPS_TABS.has(stored)) {
+      return stored;
+    }
+  } catch (_err) {
+  }
+  return "overview";
+}
+
+function openInspectorModal(title, summaryHtml, payload) {
+  document.getElementById("inspector-title").textContent = title || "Details";
+  document.getElementById("inspector-summary").innerHTML = summaryHtml || "";
+  document.getElementById("inspector-raw").textContent = JSON.stringify(payload || {}, null, 2);
+  document.getElementById("inspector-modal").showModal();
+}
+
+function closeInspectorModal() {
+  document.getElementById("inspector-modal").close();
+}
+
+function openAlertModal(index) {
+  const item = currentAlerts[index];
+  if (!item) return;
+  const samples = Array.isArray(item.samples) ? item.samples : [];
+  openInspectorModal(
+    item.title || item.rule_id || "Alert",
+    `
+      <div class="inspector-grid">
+        <div><strong>Rule</strong>${esc(item.rule_id || "")}</div>
+        <div><strong>Severity</strong><span class="${badgeClass(item.severity)}">${esc(item.severity || "")}</span></div>
+        <div><strong>Value</strong>${esc(formatAlertValue(item))}</div>
+        <div><strong>Message</strong>${esc(item.message || "")}</div>
+      </div>
+      ${samples.length ? `<div class="inspector-block"><strong>Samples</strong>${samples.map((sample) => `
+        <div class="inspector-item">
+          <div>${esc(sample.component_label || sample.component || "")} · ${esc(sample.operation || "")}</div>
+          <div class="sub">${esc(sample.kb_id || "system")} · ${esc(formatTs(sample.started_at || ""))}</div>
+          <div class="sub">${esc(sample.error_message || "")}</div>
+        </div>
+      `).join("")}</div>` : ""}
+    `,
+    item,
+  );
+}
+
+function openHealthModal(index) {
+  const check = currentHealthChecks[index];
+  if (!check) return;
+  const metrics = currentOverview?.components?.[check.id] || null;
+  openInspectorModal(
+    check.label || check.id || "Health Check",
+    `
+      <div class="inspector-grid">
+        <div><strong>Component</strong>${esc(check.id || "")}</div>
+        <div><strong>Status</strong><span class="${badgeClass(check.status)}">${esc(titleCase(check.status || ""))}</span></div>
+        <div><strong>Detail</strong>${esc(check.detail || "")}</div>
+        <div><strong>Description</strong>${esc(check.description || "")}</div>
+      </div>
+      ${metrics ? `
+        <div class="inspector-block">
+          <strong>Recent Metrics</strong>
+          <div class="inspector-grid">
+            <div><strong>Latest Operation</strong>${esc(metrics.latest_operation || "")}</div>
+            <div><strong>Active Now</strong>${esc(metrics.active_count || 0)}</div>
+            <div><strong>Stalled</strong>${esc(metrics.stalled_count || 0)}</div>
+            <div><strong>Status Counts</strong>${esc(JSON.stringify(metrics.status_counts || {}))}</div>
+            <div><strong>P95 Latency</strong>${esc(formatDuration(metrics.latency_ms?.p95_ms || 0))}</div>
+          </div>
+        </div>
+      ` : ""}
+    `,
+    { check, metrics },
+  );
+}
+
+function openKbModal(index) {
+  const item = currentKbActivity[index];
+  if (!item) return;
+  openInspectorModal(
+    item.kb_id || "KB Activity",
+    `
+      <div class="inspector-grid">
+        <div><strong>Collection</strong>${esc(item.collection_name || "")}</div>
+        <div><strong>Active Stages</strong>${esc(item.active_count || 0)}</div>
+        <div><strong>Stalled Stages</strong>${esc(item.stalled_count || 0)}</div>
+        <div><strong>Documents</strong>${esc(JSON.stringify(item.documents_by_status || {}))}</div>
+        <div><strong>KB Tasks</strong>${esc(JSON.stringify(item.task_activity || {}))}</div>
+        <div><strong>RustFS Events</strong>${esc(JSON.stringify(item.event_activity || {}))}</div>
+        <div><strong>Current Stages</strong>${esc((item.current_stages || []).join(", ") || "idle")}</div>
+      </div>
+      <div class="inspector-block">
+        <strong>Active Operations</strong>
+        ${renderLiveOps(item.live_operations, "No active operations for this KB")}
+      </div>
+      <div class="inspector-block">
+        <strong>Recently Completed Stages For Active File</strong>
+        ${renderLiveOps(item.recent_completed_stages, "No completed stage details captured yet")}
+      </div>
+      <div class="inspector-block">
+        <strong>Stalled Operations</strong>
+        ${renderLiveOps(item.stalled_operations, "No stalled operations for this KB")}
+      </div>
+      <div class="inspector-block">
+        <strong>Latest Activity</strong>
+        ${item.latest_activity ? `
+          <div class="inspector-item">
+            <div>${esc(item.latest_activity.component_label || item.latest_activity.component || "")} · ${esc(item.latest_activity.operation || "")}</div>
+            <div class="sub">${esc(item.latest_activity.status || "")} · ${esc(formatTs(item.latest_activity.started_at || ""))}</div>
+            <div class="sub">${esc(formatDuration(item.latest_activity.duration_ms || 0))}</div>
+          </div>
+        ` : '<div class="sub">No recent activity</div>'}
+      </div>
+      <div class="inspector-block">
+        <strong>Latest Failure</strong>
+        ${item.latest_failure ? `
+          <div class="inspector-item">
+            <div>${esc(item.latest_failure.component_label || item.latest_failure.component || "")} · ${esc(item.latest_failure.operation || "")}</div>
+            <div class="sub">${esc(formatTs(item.latest_failure.started_at || ""))}</div>
+            <div class="sub">${esc(item.latest_failure.error_message || "")}</div>
+          </div>
+        ` : '<div class="sub">No recent failure</div>'}
+      </div>
+    `,
+    item,
+  );
+}
+
 async function fetchJson(path) {
   const resp = await fetch(path, { cache: "no-store" });
   if (!resp.ok) {
@@ -54,7 +298,8 @@ async function fetchJson(path) {
 }
 
 function renderOverview(data) {
-  document.getElementById("generated-at").textContent = `Generated at ${data.generated_at} · auto-refresh every 15s`;
+  currentOverview = data;
+  document.getElementById("generated-at").textContent = `Generated at ${formatTs(data.generated_at)} · auto-refresh every 5s`;
   const healthStatus = data.health?.status || "unknown";
   const pill = document.getElementById("health-pill");
   pill.textContent = `health: ${healthStatus}`;
@@ -63,28 +308,150 @@ function renderOverview(data) {
   const inventory = data.inventory || {};
   const inventoryCards = [
     ["Knowledge Bases", inventory.kbs_total || 0],
-    ["Documents", Object.values(inventory.documents_by_status || {}).reduce((a, b) => a + b, 0)],
-    ["Tasks", Object.values(inventory.tasks_by_status || {}).reduce((a, b) => a + b, 0)],
-    ["Queued Events", (inventory.rustfs_events_by_status || {}).queued || 0],
+    ["Active Documents", inventory.documents_active || 0],
+    ["Queued Events", inventory.queued_events || 0],
+    ["Active Operations", inventory.running_operations || 0],
+    ["Stalled Operations", inventory.stalled_operations || 0],
   ];
   document.getElementById("inventory-grid").innerHTML = inventoryCards.map(([label, value]) => (
     `<div class="card"><div class="k">${esc(label)}</div><div class="v">${esc(value)}</div></div>`
   )).join("");
 
   const alerts = data.alerts || [];
-  document.getElementById("alerts").innerHTML = alerts.length ? alerts.map((item) => (
-    `<div class="alert ${esc(item.severity)}"><strong>${esc(item.rule_id)}</strong><span>${esc(formatAlertValue(item))}</span></div>`
+  currentAlerts = alerts;
+  document.getElementById("alerts").innerHTML = alerts.length ? alerts.map((item, index) => (
+    `<button type="button" class="alert interactive-card ${esc(item.severity)}" onclick="openAlertModal(${index})">
+      <div class="alert-head">
+        <div>
+          <div class="alert-rule">${esc(item.rule_id)}</div>
+          <div class="alert-title">${esc(item.title || item.rule_id)}</div>
+        </div>
+        <div class="${badgeClass(item.severity)}">${esc(formatAlertValue(item))}</div>
+      </div>
+      <div class="alert-message">${esc(item.message || "")}</div>
+      ${(item.samples || []).length ? `<div class="alert-samples">${item.samples.map((sample) => `
+        <div class="alert-sample">
+          <div>${esc(sample.component_label || sample.component || "")} · ${esc(sample.operation || "")}</div>
+          <div>${esc(sample.kb_id || "system")} · ${esc(formatTs(sample.started_at || ""))}</div>
+          <div>${esc(compact(sample.error_message || "", 160))}</div>
+        </div>
+      `).join("")}</div>` : ""}
+    </button>`
   )).join("") : '<div class="empty">No active alerts</div>';
 
   const checks = data.health?.checks || [];
-  document.getElementById("health-grid").innerHTML = checks.map((check) => (
-    `<div class="health-item"><div class="name">${esc(check.name)}</div><div class="status ${badgeClass(check.status)}">${esc(check.status)}</div><div class="detail">${esc(check.detail)}</div></div>`
-  )).join("");
+  currentHealthChecks = checks;
+  document.getElementById("health-grid").innerHTML = checks.map((check, index) => {
+    const metrics = data.components?.[check.id] || null;
+    return (
+      `<button type="button" class="health-item interactive-card" onclick="openHealthModal(${index})">
+        <div class="health-top">
+          <div>
+            <div class="health-title">${esc(check.label || check.id || "")}</div>
+            <div class="health-id">${esc(check.id || "")}</div>
+          </div>
+          <div class="status ${badgeClass(check.status)}">${esc(titleCase(check.status))}</div>
+        </div>
+        <div class="detail">${esc(check.detail)}</div>
+        ${metrics ? `
+          <div class="health-metrics">
+            <div><strong>Latest</strong>${esc(metrics.latest_operation || metrics.latest_status || "")}</div>
+            <div><strong>Active Now</strong>${esc(metrics.active_count || 0)}</div>
+            <div><strong>Stalled</strong>${esc(metrics.stalled_count || 0)}</div>
+            <div><strong>Last Result</strong>${esc(titleCase(metrics.latest_status || "idle"))}</div>
+          </div>
+        ` : ""}
+        <div class="desc">${esc(check.description || "")}</div>
+      </button>`
+    );
+  }).join("");
+
+  const runningByKb = new Map();
+  for (const row of (Array.isArray(data.running_operations) ? data.running_operations : [])) {
+    const kbId = String(row?.kb_id || "");
+    if (!kbId) continue;
+    const items = runningByKb.get(kbId) || [];
+    items.push(row);
+    runningByKb.set(kbId, items);
+  }
 
   const components = data.components || {};
   document.getElementById("component-metrics").innerHTML = Object.entries(components).map(([name, item]) => (
-    `<tr><td>${esc(name)}<div class="sub">${esc(item.detail || "")}</div></td><td>${esc(JSON.stringify(item.status_counts || {}))}</td><td>${formatDuration(item.latency_ms?.p50_ms || 0)}</td><td>${formatDuration(item.latency_ms?.p95_ms || 0)}</td><td>${formatDuration(item.latency_ms?.max_ms || 0)}</td></tr>`
+    `<tr>
+      <td>${esc(item.label || name)}<div class="sub">${esc(item.description || "")}</div></td>
+      <td>
+        <div class="detail-stack">
+          <div>${esc(titleCase(item.status || "idle"))}</div>
+          <div class="sub">${esc(item.latest_operation || item.detail || "")}</div>
+          <div class="sub">active=${esc(item.active_count || 0)} stalled=${esc(item.stalled_count || 0)}</div>
+        </div>
+      </td>
+      <td>${esc(JSON.stringify(item.status_counts || {}))}</td>
+      <td>${formatDuration(item.latency_ms?.p50_ms || 0)}</td>
+      <td>${formatDuration(item.latency_ms?.p95_ms || 0)}</td>
+      <td>${formatDuration(item.latency_ms?.max_ms || 0)}</td>
+    </tr>`
   )).join("");
+
+  const kbActivity = Array.isArray(data.kb_activity) ? data.kb_activity : [];
+  currentKbActivity = kbActivity.map((item) => {
+    const activeOps = Array.isArray(item.live_operations) && item.live_operations.length
+      ? item.live_operations
+      : (runningByKb.get(String(item.kb_id || "")) || []).slice(0, 8);
+    return {
+      ...item,
+      live_operations: activeOps,
+      recent_completed_stages: Array.isArray(item.recent_completed_stages) ? item.recent_completed_stages : [],
+      stalled_operations: Array.isArray(item.stalled_operations) ? item.stalled_operations : [],
+    };
+  });
+  document.getElementById("kb-activity").innerHTML = currentKbActivity.map((item, index) => (
+    `<tr>
+      <td>
+        ${esc(item.kb_id)}
+        <div class="sub">${esc(item.collection_name || "")}</div>
+      </td>
+      <td>
+        <div class="detail-stack">
+          <div>active=${esc(item.documents_by_status?.active || 0)}</div>
+          <div class="sub">failed=${esc(item.documents_by_status?.failed || 0)}</div>
+          <div class="sub">deleted=${esc(item.documents_by_status?.deleted || 0)}</div>
+        </div>
+      </td>
+      <td>
+        <div class="detail-stack">
+          <div><strong>Active</strong></div>
+          ${renderStageBadges(item.current_stages)}
+          ${renderLiveOps(item.live_operations, "No live ops")}
+          ${(item.stalled_operations || []).length ? `<div><strong>Stalled</strong></div>${renderLiveOps(item.stalled_operations, "No stalled ops")}` : ""}
+        </div>
+      </td>
+      <td>
+        <div class="detail-stack">
+          <div>kb tasks active=${esc(item.task_activity?.active || 0)}</div>
+          <div class="sub">kb tasks stalled=${esc(item.task_activity?.stalled || 0)}</div>
+          <div class="sub">events queued=${esc(item.event_activity?.queued || 0)}</div>
+          <div class="sub">events active=${esc(item.event_activity?.active || 0)}</div>
+          <div class="sub">events stalled=${esc(item.event_activity?.stalled || 0)}</div>
+        </div>
+      </td>
+      <td>${item.latest_activity ? `
+        <div class="detail-stack">
+          <div>${esc(item.latest_activity.component_label || item.latest_activity.component || "")} · ${esc(item.latest_activity.operation || "")}</div>
+          <div class="sub">${esc(item.latest_activity.status || "")} · ${esc(formatTs(item.latest_activity.started_at || ""))}</div>
+          <div class="sub">${esc(formatDuration(item.latest_activity.duration_ms || 0))}</div>
+        </div>
+      ` : '<span class="sub">No recent activity</span>'}</td>
+      <td>${item.latest_failure ? `
+        <div class="detail-stack">
+          <div>${esc(item.latest_failure.component_label || item.latest_failure.component || "")}</div>
+          <div class="sub">${esc(formatTs(item.latest_failure.started_at || ""))}</div>
+          <div class="sub">${esc(compact(item.latest_failure.error_message || "", 120))}</div>
+        </div>
+      ` : '<span class="sub">No recent failure</span>'}</td>
+      <td><button type="button" class="inline-open" onclick="openKbModal(${index})">Open</button></td>
+    </tr>`
+  )).join("") || '<tr><td colspan="7" class="empty">No KB activity found.</td></tr>';
 
   const spans = Array.isArray(data.recent_spans) ? data.recent_spans : [];
   const parentSpanIds = new Set(
@@ -96,7 +463,15 @@ function renderOverview(data) {
     .filter((item) => !parentSpanIds.has(String(item?.span_id || "").trim()))
     .slice(0, 30);
   document.getElementById("recent-spans").innerHTML = currentRecentSpans.map((item, index) => (
-    `<tr><td>${esc(item.started_at)}</td><td>${esc(item.component)}</td><td>${esc(item.operation)}</td><td class="${badgeClass(item.status)}">${esc(item.status)}</td><td title="${Number(item.duration_ms || 0).toFixed(1)} ms">${formatDuration(item.duration_ms || 0)}</td><td>${esc(item.kb_id || "")}</td><td><button type="button" class="span-open" onclick="openSpanModal(${index})">Open</button></td></tr>`
+    `<tr>
+      <td>${esc(item.started_at)}</td>
+      <td>${esc(item.component_label || item.component)}<div class="sub">${esc(item.component || "")}</div></td>
+      <td>${esc(item.stage || "")}<div class="sub">${esc(item.operation || "")}</div></td>
+      <td class="${badgeClass(item.status)}">${esc(item.status)}</td>
+      <td title="${Number(item.duration_ms || 0).toFixed(1)} ms">${formatDuration(item.duration_ms || 0)}</td>
+      <td>${esc(item.kb_id || "")}</td>
+      <td><button type="button" class="span-open" onclick="openSpanModal(${index})">Open</button></td>
+    </tr>`
   )).join("");
 
   rawPayloads.health = JSON.stringify(data.health || {}, null, 2);
@@ -367,7 +742,7 @@ async function refreshMetrics() {
 
 async function refreshFiles() {
   try {
-    renderFiles(await fetchJson("/api/v1/admin/ops/files?limit=24&chunk_preview=8"));
+    renderFiles(await fetchJson("/api/v1/admin/ops/files?limit=100&chunk_preview=8"));
   } catch (err) {
     console.error("failed to refresh file inventory", err);
   }
@@ -383,13 +758,14 @@ async function refreshKbOptions() {
 }
 
 async function bootstrap() {
+  switchOpsTab(preferredOpsTab());
   await Promise.all([refreshOverview(), refreshMetrics(), refreshFiles(), refreshKbOptions()]);
   setInterval(() => {
     refreshOverview();
     refreshMetrics();
     refreshFiles();
     refreshKbOptions();
-  }, 15000);
+  }, 5000);
 }
 
 window.openFileModal = openFileModal;
@@ -398,6 +774,11 @@ window.openSpanModal = openSpanModal;
 window.closeSpanModal = closeSpanModal;
 window.openRawModal = openRawModal;
 window.closeRawModal = closeRawModal;
+window.openAlertModal = openAlertModal;
+window.openHealthModal = openHealthModal;
+window.openKbModal = openKbModal;
+window.closeInspectorModal = closeInspectorModal;
+window.switchOpsTab = switchOpsTab;
 window.runQuery = runQuery;
 window.renderFiles = renderFiles;
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 import logging
@@ -73,6 +74,13 @@ class ObservedOperation:
         for key, value in details.items():
             if value is not None:
                 self.details[key] = value
+        if self._store is not None and self.span_id is not None and not self._finished:
+            update_fn = getattr(self._store, "update_operation_span", None)
+            if callable(update_fn):
+                update_fn(
+                    span_id=self.span_id,
+                    details=self.details,
+                )
 
     def __enter__(self) -> "ObservedOperation":
         self.trace_id = current_trace_id() or str(uuid.uuid4())
@@ -100,7 +108,9 @@ class ObservedOperation:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        status = "failed" if exc is not None else "success"
+        status = "success"
+        if exc is not None:
+            status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
         error_message = str(exc) if exc is not None else None
         self.finish(status=status, error_message=error_message)
         return False

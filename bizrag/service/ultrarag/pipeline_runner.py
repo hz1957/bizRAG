@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,8 +11,12 @@ import ultrarag.client as ultrarag_client
 from dotenv import load_dotenv
 from ultrarag.mcp_logging import get_logger
 
+from bizrag.common.io_utils import load_yaml
+
 PIPELINES_DIR = Path(__file__).resolve().parents[2] / "pipelines"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_REMOTE_NODE_READY = False
+logger = logging.getLogger("bizrag.pipeline_runner")
 
 
 def _prepare_runtime_env() -> None:
@@ -44,6 +49,23 @@ def _configure_ultrarag_logging(log_level: str) -> None:
     ultrarag_client.logger = get_logger("Client", normalized)
 
 
+def _ensure_remote_mcp_runtime() -> None:
+    global _REMOTE_NODE_READY
+    if _REMOTE_NODE_READY:
+        return
+    try:
+        ultrarag_client.check_node_version(20)
+        _REMOTE_NODE_READY = True
+    except ultrarag_client.NodeNotInstalledError as exc:
+        raise RuntimeError(
+            "Remote MCP servers require Node.js >= 20, but Node.js was not found."
+        ) from exc
+    except ultrarag_client.NodeVersionTooLowError as exc:
+        raise RuntimeError(
+            "Remote MCP servers require Node.js >= 20, but the installed version is too low."
+        ) from exc
+
+
 @dataclass
 class _PersistentPipelineSession:
     context: Dict[str, Any]
@@ -63,7 +85,10 @@ class _PersistentPipelineSession:
         async with self.start_lock:
             if not self.entered:
                 return
-            await self.client.__aexit__(None, None, None)
+            try:
+                await self.client.__aexit__(None, None, None)
+            except asyncio.CancelledError:
+                logger.debug("Pipeline client shutdown was cancelled; ignoring during cleanup")
             self.entered = False
 
 
@@ -73,18 +98,58 @@ class UltraRAGPipelineRunner:
         self._sessions: Dict[str, _PersistentPipelineSession] = {}
         self._sessions_lock = asyncio.Lock()
 
-    def _pipeline_paths(self, pipeline_name: str) -> tuple[Path, Path]:
+    def _pipeline_path(self, pipeline_name: str) -> Path:
         pipeline_file = self._pipelines_dir / f"{pipeline_name}.yaml"
         if not pipeline_file.is_file():
             raise FileNotFoundError(f"Pipeline config not found: {pipeline_file}")
-        server_companion = pipeline_file.parent / "server" / (
-            f"{pipeline_file.stem}_server.yaml"
-        )
-        if not server_companion.is_file():
-            raise FileNotFoundError(
-                f"Pipeline server companion not found: {server_companion}"
-            )
-        return pipeline_file, server_companion
+        return pipeline_file
+
+    def _load_pipeline_context(self, pipeline_file: Path) -> Dict[str, Any]:
+        init_cfg = load_yaml(pipeline_file)
+        server_paths = init_cfg.get("servers", {}) or {}
+        pipeline_cfg = init_cfg.get("pipeline", []) or []
+
+        server_cfg: Dict[str, Dict[str, Any]] = {}
+        for name, relative_server_dir in server_paths.items():
+            server_dir = Path(str(relative_server_dir))
+            if not server_dir.is_absolute():
+                server_dir = (PROJECT_ROOT / server_dir).resolve()
+            server_cfg[name] = load_yaml(server_dir / "server.yaml")
+
+        cfg_name = pipeline_file.stem
+        param_config_path = pipeline_file.parent / "parameter" / f"{cfg_name}_parameter.yaml"
+        param_cfg = load_yaml(param_config_path) if param_config_path.is_file() else {}
+        for srv_name in server_cfg.keys():
+            server_cfg[srv_name]["parameter"] = param_cfg.get(srv_name, {})
+
+        mcp_cfg = {"mcpServers": {}}
+        for name, sc in server_cfg.items():
+            path = str(sc.get("path", "") or "")
+            if path.endswith(".py"):
+                mcp_cfg["mcpServers"][name] = {
+                    "command": "python",
+                    "args": [path],
+                    "env": os.environ.copy(),
+                }
+            elif path.startswith(("http://", "https://")):
+                _ensure_remote_mcp_runtime()
+                mcp_cfg["mcpServers"][name] = {
+                    "command": "npx",
+                    "args": ["-y", "mcp-remote", path],
+                    "env": os.environ.copy(),
+                }
+            else:
+                raise ValueError(f"Unsupported server type for {name}: {path}")
+
+        return {
+            "config_path": str(pipeline_file),
+            "param_config_path": param_config_path,
+            "cfg_name": cfg_name,
+            "mcp_cfg": mcp_cfg,
+            "server_cfg": server_cfg,
+            "pipeline_cfg": pipeline_cfg,
+            "init_cfg": init_cfg,
+        }
 
     async def _get_session(
         self,
@@ -95,10 +160,10 @@ class UltraRAGPipelineRunner:
         async with self._sessions_lock:
             session = self._sessions.get(pipeline_name)
             if session is None:
-                pipeline_file, _ = self._pipeline_paths(pipeline_name)
+                pipeline_file = self._pipeline_path(pipeline_name)
                 _prepare_runtime_env()
                 _configure_ultrarag_logging(log_level)
-                context = ultrarag_client.load_pipeline_context(str(pipeline_file))
+                context = self._load_pipeline_context(pipeline_file)
                 session = _PersistentPipelineSession(
                     context=context,
                     client=ultrarag_client.create_mcp_client(context["mcp_cfg"]),
@@ -146,7 +211,10 @@ class UltraRAGPipelineRunner:
             sessions = list(self._sessions.values())
             self._sessions = {}
         for session in sessions:
-            await session.close()
+            try:
+                await session.close()
+            except asyncio.CancelledError:
+                logger.debug("Pipeline session shutdown was cancelled; ignoring during cleanup")
 
 
 DEFAULT_PIPELINE_RUNNER = UltraRAGPipelineRunner()

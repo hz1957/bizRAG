@@ -98,7 +98,9 @@ class FileServiceInventoryService:
                 ) AS version_created_at
             FROM files f
             WHERE (? IS NULL OR f.kb_id = ?)
-            ORDER BY f.updated_at DESC
+            ORDER BY
+                CASE WHEN f.status = 'active' THEN 0 ELSE 1 END ASC,
+                f.updated_at DESC
             LIMIT ?
         """
         with self._connect() as conn:
@@ -166,7 +168,7 @@ class FileServiceInventoryService:
         self,
         *,
         kb_id: Optional[str] = None,
-        limit: int = 30,
+        limit: int = 100,
         chunk_preview: int = 12,
     ) -> Dict[str, Any]:
         files = self._list_files(kb_id=kb_id, limit=limit)

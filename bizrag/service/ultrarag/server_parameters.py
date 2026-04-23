@@ -81,6 +81,25 @@ def merge_with_default_server_parameters(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return deep_merge_dicts(_default_server_parameters(), normalize_server_parameters(cfg))
 
 
+def default_server_parameters() -> Dict[str, Any]:
+    return deepcopy(_default_server_parameters())
+
+
+_NO_OVERRIDE = object()
+
+
+def extract_override_dict(base: Any, target: Any) -> Any:
+    if isinstance(base, dict) and isinstance(target, dict):
+        override: Dict[str, Any] = {}
+        for key, target_value in target.items():
+            if key not in base or base[key] != target_value:
+                override[key] = deepcopy(target_value)
+        return override if override else _NO_OVERRIDE
+    if base == target:
+        return _NO_OVERRIDE
+    return deepcopy(target)
+
+
 def _load_server_parameter_override(path: Path, visited: set[Path]) -> Dict[str, Any]:
     resolved_path = path.resolve()
     if resolved_path in visited:

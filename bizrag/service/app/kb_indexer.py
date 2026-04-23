@@ -11,19 +11,25 @@ from bizrag.common.observability import observe_operation
 from bizrag.infra.metadata_store import MetadataStore
 from bizrag.common.io_utils import load_jsonl, write_jsonl
 from bizrag.service.ultrarag.pipeline_outputs import extract_int_output
-from bizrag.service.ultrarag.pipeline_runner import DEFAULT_PIPELINE_RUNNER
+from bizrag.service.ultrarag.pipeline_runner import UltraRAGPipelineRunner
 from bizrag.service.app.kb_artifacts import combined_paths, iter_jsonl_paths
-from bizrag.service.app.kb_config import load_kb_retriever_parameters
+from bizrag.service.app.kb_config import resolve_kb_retriever_parameters
 
 logger = logging.getLogger("bizrag.kb_admin")
 
 
 class KBIndexManager:
-    def __init__(self, *, store: MetadataStore) -> None:
+    def __init__(
+        self,
+        *,
+        store: MetadataStore,
+        pipeline_runner: Optional[UltraRAGPipelineRunner] = None,
+    ) -> None:
         self._store = store
+        self._pipeline_runner = pipeline_runner or UltraRAGPipelineRunner()
 
     def _runtime_cfg(self, kb: Dict[str, Any]) -> Dict[str, Any]:
-        return load_kb_retriever_parameters(str(kb["retriever_config_path"]))
+        return resolve_kb_retriever_parameters(kb=kb)
 
     @staticmethod
     def _retriever_params(runtime_cfg: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
@@ -82,7 +88,7 @@ class KBIndexManager:
             kb_id=collection_name,
             details={"corpus_path": corpus_path, "overwrite": overwrite},
         ):
-            await DEFAULT_PIPELINE_RUNNER.run(
+            await self._pipeline_runner.run(
                 "milvus_index",
                 params=self._retriever_params(
                     runtime_cfg,
@@ -107,7 +113,7 @@ class KBIndexManager:
             kb_id=str(runtime_cfg.get("collection_name") or ""),
             details={"corpus_path": corpus_path, "overwrite": overwrite},
         ):
-            await DEFAULT_PIPELINE_RUNNER.run(
+            await self._pipeline_runner.run(
                 "bm25_index",
                 params=self._bm25_params(
                     runtime_cfg,
@@ -123,7 +129,7 @@ class KBIndexManager:
         collection_name: str,
         doc_key: str,
     ) -> int:
-        result = await DEFAULT_PIPELINE_RUNNER.run(
+        result = await self._pipeline_runner.run(
             "milvus_delete",
             params=self._retriever_params(
                 runtime_cfg,
@@ -139,7 +145,7 @@ class KBIndexManager:
         runtime_cfg: Dict[str, Any],
         collection_name: str,
     ) -> None:
-        await DEFAULT_PIPELINE_RUNNER.run(
+        await self._pipeline_runner.run(
             "milvus_drop_collection",
             params=self._retriever_params(
                 runtime_cfg,

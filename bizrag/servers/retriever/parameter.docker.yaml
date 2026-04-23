@@ -2,6 +2,8 @@ retriever:
   model_name_or_path: BAAI/bge-large-zh-v1.5
   index_backend: milvus
   batch_size: 8
+  top_k: 12
+  retrieval_top_k: 12
   gpu_ids: null
   backend_configs:
     sentence_transformers:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import base64
 import hashlib
 import hmac
@@ -17,6 +19,7 @@ from pydantic import BaseModel
 
 from bizrag.contracts.schemas import RustFSEventRequest
 from bizrag.common.observability import observe_operation
+from bizrag.common.time_utils import utc_now
 from bizrag.common.errors import (
     BadRequestError,
     InternalServiceError,
@@ -27,6 +30,78 @@ from bizrag.common.errors import (
 from bizrag.service.app.kb_admin import KBAdmin
 
 RunAdminAsync = Callable[..., Awaitable[Any]]
+
+
+def _default_event_heartbeat_interval_seconds(lease_seconds: float) -> float:
+    return max(2.0, float(lease_seconds) / 3.0)
+
+
+def _begin_event_processing(
+    *,
+    admin: KBAdmin,
+    event_id: str,
+    req: RustFSEventRequest,
+    worker_id: str,
+    lease_seconds: float,
+    existing: Optional[Dict[str, Any]],
+    payload: Dict[str, Any],
+) -> None:
+    now = utc_now()
+    lease_expires_at = admin.store._future_utc_iso(lease_seconds)
+    if existing is None:
+        admin.store.create_rustfs_event(
+            event_id=event_id,
+            kb_id=req.kb_id,
+            event_type=req.event_type.strip().lower(),
+            status="running",
+            source_uri=_event_source_uri(req),
+            payload=payload,
+            worker_id=worker_id,
+            claimed_at=now,
+            heartbeat_at=now,
+            lease_expires_at=lease_expires_at,
+            attempt_count=1,
+        )
+        return
+    admin.store.update_rustfs_event(
+        event_id,
+        status="running",
+        result={},
+        error_message=None,
+        worker_id=worker_id,
+        claimed_at=now,
+        heartbeat_at=now,
+        lease_expires_at=lease_expires_at,
+        attempt_count=int(existing.get("attempt_count") or 0) + 1,
+    )
+
+
+def _start_event_heartbeat(
+    *,
+    admin: KBAdmin,
+    event_id: str,
+    worker_id: str,
+    lease_seconds: float,
+    heartbeat_interval_seconds: float,
+) -> asyncio.Task[None]:
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(max(1.0, heartbeat_interval_seconds))
+            admin.store.touch_rustfs_event_lease(
+                event_id,
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+            )
+
+    return asyncio.create_task(_heartbeat())
+
+
+async def _stop_background_task(task: Optional[asyncio.Task[None]]) -> None:
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 def _dump_model(model: BaseModel, *, exclude_none: bool = False) -> Dict[str, Any]:
@@ -184,9 +259,6 @@ async def _process_rustfs_event(
                 logical_file_name=logical_file_name,
                 force=req.force,
                 prefer_mineru=req.prefer_mineru,
-                chunk_backend=req.chunk_backend,
-                chunk_size=req.chunk_size,
-                chunk_overlap=req.chunk_overlap,
             )
             return {
                 "event_id": event_id,
@@ -204,6 +276,19 @@ async def _process_rustfs_event(
             )
             if not target_source:
                 raise ValueError("payload_path or source_uri is required for document.deleted")
+            if admin.store.get_kb(req.kb_id) is None:
+                return {
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "action": "delete",
+                    "result": {
+                        "kb_id": req.kb_id,
+                        "source_uri": target_source,
+                        "deleted": False,
+                        "status": "noop",
+                        "reason": "kb_missing",
+                    },
+                }
             result = await run_admin_async(
                 "delete_document",
                 kb_id=req.kb_id,
@@ -249,9 +334,6 @@ async def _process_rustfs_event(
                 ),
                 force=req.force,
                 prefer_mineru=req.prefer_mineru,
-                chunk_backend=req.chunk_backend,
-                chunk_size=req.chunk_size,
-                chunk_overlap=req.chunk_overlap,
             )
             return {
                 "event_id": event_id,
@@ -281,6 +363,10 @@ async def handle_rustfs_event_request(
     x_rustfs_signature: Optional[str],
     verify_headers: bool = True,
     replay_of: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    lease_seconds: float = 60.0,
+    heartbeat_interval_seconds: Optional[float] = None,
+    start_processing: bool = True,
 ) -> Dict[str, Any]:
     if verify_headers:
         verify_rustfs_headers(
@@ -306,17 +392,45 @@ async def handle_rustfs_event_request(
     if replay_of:
         payload["replay_of"] = replay_of
 
-    if existing is None:
-        admin.store.create_rustfs_event(
+    resolved_worker_id = worker_id or f"inline:{uuid.uuid4().hex[:12]}"
+    if start_processing:
+        _begin_event_processing(
+            admin=admin,
             event_id=event_id,
-            kb_id=req.kb_id,
-            event_type=req.event_type.strip().lower(),
-            status="running",
-            source_uri=_event_source_uri(req),
+            req=req,
+            worker_id=resolved_worker_id,
+            lease_seconds=lease_seconds,
+            existing=existing,
+            payload=payload,
+        )
+    elif existing is None:
+        _begin_event_processing(
+            admin=admin,
+            event_id=event_id,
+            req=req,
+            worker_id=resolved_worker_id,
+            lease_seconds=lease_seconds,
+            existing=None,
             payload=payload,
         )
     else:
-        admin.store.update_rustfs_event(event_id, status="running", result={})
+        admin.store.touch_rustfs_event_lease(
+            event_id,
+            worker_id=resolved_worker_id,
+            lease_seconds=lease_seconds,
+        )
+
+    heartbeat_task = _start_event_heartbeat(
+        admin=admin,
+        event_id=event_id,
+        worker_id=resolved_worker_id,
+        lease_seconds=lease_seconds,
+        heartbeat_interval_seconds=(
+            heartbeat_interval_seconds
+            if heartbeat_interval_seconds is not None
+            else _default_event_heartbeat_interval_seconds(lease_seconds)
+        ),
+    )
 
     try:
         async with observe_operation(
@@ -334,24 +448,38 @@ async def handle_rustfs_event_request(
                 run_admin_async=run_admin_async,
             )
             span.annotate(action=result.get("action"))
-            admin.store.update_rustfs_event(event_id, status="success", result=result, error_message=None)
+            admin.store.finish_rustfs_event(
+                event_id,
+                status="success",
+                result=result,
+                error_message=None,
+            )
             return result
+    except asyncio.CancelledError:
+        admin.store.finish_rustfs_event(
+            event_id,
+            status="cancelled",
+            error_message="RustFS event cancelled during processing",
+        )
+        raise
     except ServiceError as exc:
-        admin.store.update_rustfs_event(
+        admin.store.finish_rustfs_event(
             event_id,
             status="failed",
             error_message=exc.detail,
         )
         raise
     except ValueError as exc:
-        admin.store.update_rustfs_event(event_id, status="failed", error_message=str(exc))
+        admin.store.finish_rustfs_event(event_id, status="failed", error_message=str(exc))
         raise BadRequestError(str(exc)) from exc
     except RuntimeError as exc:
-        admin.store.update_rustfs_event(event_id, status="failed", error_message=str(exc))
+        admin.store.finish_rustfs_event(event_id, status="failed", error_message=str(exc))
         raise BadRequestError(str(exc)) from exc
     except Exception as exc:
-        admin.store.update_rustfs_event(event_id, status="failed", error_message=str(exc))
+        admin.store.finish_rustfs_event(event_id, status="failed", error_message=str(exc))
         raise InternalServiceError(str(exc)) from exc
+    finally:
+        await _stop_background_task(heartbeat_task)
 
 
 def enqueue_rustfs_event(

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from bizrag.common.time_utils import utc_now
+from bizrag.migrations.knowledge_bases import (
+    migrate_knowledge_bases_schema,
+    run_knowledge_base_migrations_once,
+)
+from bizrag.migrations.runtime_lifecycle import migrate_runtime_lifecycle_schema
 
 
 @dataclass
@@ -30,6 +36,7 @@ class MetadataStore:
             self.conn = sqlite3.connect(str(sqlite_path))
             self.conn.row_factory = sqlite3.Row
         self._init_schema()
+        run_knowledge_base_migrations_once(self)
 
     def close(self) -> None:
         self.conn.close()
@@ -79,7 +86,7 @@ class MetadataStore:
                     display_name TEXT,
                     source_root TEXT,
                     workspace_dir TEXT NOT NULL,
-                    retriever_config_path TEXT NOT NULL,
+                    source_parameters_path TEXT NOT NULL,
                     index_uri TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -131,6 +138,11 @@ class MetadataStore:
                     payload_json TEXT,
                     result_json TEXT,
                     error_message TEXT,
+                    worker_id TEXT,
+                    claimed_at TEXT,
+                    heartbeat_at TEXT,
+                    lease_expires_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -163,6 +175,8 @@ class MetadataStore:
                 ON operation_spans (component, status, started_at);
                 """
             )
+            migrate_knowledge_bases_schema(self)
+            migrate_runtime_lifecycle_schema(self)
             self.conn.commit()
             return
 
@@ -174,7 +188,7 @@ class MetadataStore:
                 display_name VARCHAR(255) NULL,
                 source_root TEXT NULL,
                 workspace_dir TEXT NOT NULL,
-                retriever_config_path TEXT NOT NULL,
+                source_parameters_path TEXT NOT NULL,
                 index_uri TEXT NULL,
                 created_at VARCHAR(64) NOT NULL,
                 updated_at VARCHAR(64) NOT NULL
@@ -225,6 +239,11 @@ class MetadataStore:
                 payload_json LONGTEXT NULL,
                 result_json LONGTEXT NULL,
                 error_message LONGTEXT NULL,
+                worker_id VARCHAR(128) NULL,
+                claimed_at VARCHAR(64) NULL,
+                heartbeat_at VARCHAR(64) NULL,
+                lease_expires_at VARCHAR(64) NULL,
+                attempt_count INT NOT NULL DEFAULT 0,
                 created_at VARCHAR(64) NOT NULL,
                 updated_at VARCHAR(64) NOT NULL,
                 INDEX idx_rustfs_events_kb_created (kb_id, created_at)
@@ -255,10 +274,40 @@ class MetadataStore:
         try:
             for statement in statements:
                 self._execute(statement)
+            migrate_knowledge_bases_schema(self)
+            migrate_runtime_lifecycle_schema(self)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
+
+    def _knowledge_bases_has_column(self, column_name: str) -> bool:
+        if self.backend_name == "sqlite":
+            cursor = self._execute("PRAGMA table_info(knowledge_bases)")
+            try:
+                for row in cursor.fetchall():
+                    data = self._row_to_dict(row) or {}
+                    if str(data.get("name") or "") == column_name:
+                        return True
+                return False
+            finally:
+                cursor.close()
+
+        cursor = self._execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = ?
+              AND column_name = ?
+            """,
+            ("knowledge_bases", column_name),
+        )
+        try:
+            row = self._row_to_dict(cursor.fetchone()) or {}
+            return int(row.get("total") or 0) > 0
+        finally:
+            cursor.close()
 
     def _sql(self, sql: str) -> str:
         if self.backend_name == "mysql":
@@ -288,12 +337,15 @@ class MetadataStore:
         if row is None:
             return None
         if isinstance(row, dict):
-            return dict(row)
-        if isinstance(row, sqlite3.Row):
-            return dict(row)
-        if hasattr(row, "keys"):
-            return {key: row[key] for key in row.keys()}
-        return dict(row)
+            data = dict(row)
+        elif isinstance(row, sqlite3.Row):
+            data = dict(row)
+        elif hasattr(row, "keys"):
+            data = {key: row[key] for key in row.keys()}
+        else:
+            data = dict(row)
+
+        return data
 
     @staticmethod
     def _decode_json_fields(data: Optional[Dict[str, Any]], *fields: str) -> Optional[Dict[str, Any]]:
@@ -307,17 +359,33 @@ class MetadataStore:
                 data[field] = {}
         return data
 
+    @staticmethod
+    def _parse_iso_ts(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _future_utc_iso(seconds: float) -> str:
+        return (datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(seconds)))).isoformat()
+
     def register_kb(
         self,
         *,
         kb_id: str,
         collection_name: str,
         workspace_dir: str,
-        retriever_config_path: str,
+        source_parameters_path: Optional[str] = None,
         display_name: Optional[str] = None,
         source_root: Optional[str] = None,
         index_uri: Optional[str] = None,
     ) -> Dict[str, Any]:
+        resolved_source_parameters_path = str(source_parameters_path or "").strip()
+        if not resolved_source_parameters_path:
+            raise RuntimeError("register_kb requires source_parameters_path")
         existing = self.get_kb(kb_id)
         now = utc_now()
         if existing is None:
@@ -325,7 +393,7 @@ class MetadataStore:
                 """
                 INSERT INTO knowledge_bases (
                     kb_id, collection_name, display_name, source_root, workspace_dir,
-                    retriever_config_path, index_uri, created_at, updated_at
+                    source_parameters_path, index_uri, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -334,7 +402,7 @@ class MetadataStore:
                     display_name,
                     source_root,
                     workspace_dir,
-                    retriever_config_path,
+                    resolved_source_parameters_path,
                     index_uri,
                     now,
                     now,
@@ -348,7 +416,7 @@ class MetadataStore:
                     display_name = ?,
                     source_root = ?,
                     workspace_dir = ?,
-                    retriever_config_path = ?,
+                    source_parameters_path = ?,
                     index_uri = ?,
                     updated_at = ?
                 WHERE kb_id = ?
@@ -358,7 +426,7 @@ class MetadataStore:
                     display_name,
                     source_root,
                     workspace_dir,
-                    retriever_config_path,
+                    resolved_source_parameters_path,
                     index_uri,
                     now,
                     kb_id,
@@ -393,6 +461,56 @@ class MetadataStore:
             return int(row.get("total") or 0)
         finally:
             cursor.close()
+
+    def _count_rows(self, table: str, *, where_sql: str, params: Iterable[Any]) -> int:
+        cursor = self._execute(
+            f"SELECT COUNT(*) AS total FROM {table} WHERE {where_sql}",
+            params,
+        )
+        try:
+            row = self._row_to_dict(cursor.fetchone()) or {}
+            return int(row.get("total") or 0)
+        finally:
+            cursor.close()
+
+    def delete_kb(self, kb_id: str) -> Dict[str, int]:
+        counts = {
+            "documents": self._count_rows("documents", where_sql="kb_id = ?", params=(kb_id,)),
+            "tasks": self._count_rows("tasks", where_sql="kb_id = ?", params=(kb_id,)),
+            "rustfs_events": self._count_rows("rustfs_events", where_sql="kb_id = ?", params=(kb_id,)),
+            "operation_spans": self._count_rows(
+                "operation_spans",
+                where_sql="kb_id = ?",
+                params=(kb_id,),
+            ),
+            "knowledge_bases": self._count_rows(
+                "knowledge_bases",
+                where_sql="kb_id = ?",
+                params=(kb_id,),
+            ),
+        }
+
+        if self.backend_name == "sqlite":
+            self.conn.execute("BEGIN IMMEDIATE")
+        else:
+            self.conn.begin()
+
+        try:
+            for table in (
+                "operation_spans",
+                "tasks",
+                "rustfs_events",
+                "documents",
+                "knowledge_bases",
+            ):
+                cursor = self._execute(f"DELETE FROM {table} WHERE kb_id = ?", (kb_id,))
+                cursor.close()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return counts
 
     def get_document(self, kb_id: str, source_uri: str) -> Optional[Dict[str, Any]]:
         cursor = self._execute(
@@ -615,6 +733,21 @@ class MetadataStore:
         self.conn.commit()
         return self.get_task(task_id)
 
+    def touch_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        existing = self.get_task(task_id)
+        if existing is None:
+            return None
+        self._execute(
+            """
+            UPDATE tasks
+            SET updated_at = ?
+            WHERE task_id = ? AND status = 'running'
+            """,
+            (utc_now(), task_id),
+        )
+        self.conn.commit()
+        return self.get_task(task_id)
+
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         cursor = self._execute(
             "SELECT * FROM tasks WHERE task_id = ?",
@@ -629,17 +762,27 @@ class MetadataStore:
         finally:
             cursor.close()
 
-    def list_tasks(self, kb_id: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    def list_tasks(
+        self,
+        kb_id: Optional[str] = None,
+        limit: int = 20,
+        *,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
         if kb_id:
-            cursor = self._execute(
-                "SELECT * FROM tasks WHERE kb_id = ? ORDER BY created_at DESC LIMIT ?",
-                (kb_id, limit),
-            )
-        else:
-            cursor = self._execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            )
+            clauses.append("kb_id = ?")
+            params.append(kb_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        sql = "SELECT * FROM tasks"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        cursor = self._execute(sql, params)
         try:
             tasks: List[Dict[str, Any]] = []
             for row in cursor.fetchall():
@@ -671,6 +814,33 @@ class MetadataStore:
         finally:
             cursor.close()
 
+    def reconcile_stale_tasks(self, *, timeout_seconds: float, limit: int = 200) -> List[Dict[str, Any]]:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(0.0, float(timeout_seconds)))
+        stale: List[Dict[str, Any]] = []
+        for task in self.list_tasks(limit=max(1, limit), status="running"):
+            updated_at = self._parse_iso_ts(str(task.get("updated_at") or ""))
+            if updated_at is None or updated_at > cutoff:
+                continue
+            stale.append(task)
+
+        if not stale:
+            return []
+
+        now = utc_now()
+        error_message = "Task heartbeat expired before completion"
+        rows = [( "cancelled", error_message, now, str(task["task_id"])) for task in stale]
+        cursor = self._executemany(
+            """
+            UPDATE tasks
+            SET status = ?, error_message = ?, updated_at = ?
+            WHERE task_id = ? AND status = 'running'
+            """,
+            rows,
+        )
+        cursor.close()
+        self.conn.commit()
+        return stale
+
     def create_rustfs_event(
         self,
         *,
@@ -680,14 +850,21 @@ class MetadataStore:
         status: str,
         source_uri: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
+        worker_id: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        heartbeat_at: Optional[str] = None,
+        lease_expires_at: Optional[str] = None,
+        attempt_count: int = 0,
     ) -> Dict[str, Any]:
         now = utc_now()
         self._execute(
             """
             INSERT INTO rustfs_events (
                 event_id, kb_id, event_type, source_uri, status,
-                payload_json, result_json, error_message, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payload_json, result_json, error_message,
+                worker_id, claimed_at, heartbeat_at, lease_expires_at, attempt_count,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -698,6 +875,11 @@ class MetadataStore:
                 json.dumps(payload or {}, ensure_ascii=False),
                 None,
                 None,
+                worker_id,
+                claimed_at,
+                heartbeat_at,
+                lease_expires_at,
+                int(attempt_count),
                 now,
                 now,
             ),
@@ -714,6 +896,11 @@ class MetadataStore:
         status: Optional[str] = None,
         result: Optional[Dict[str, Any]] = None,
         error_message: Optional[str] = None,
+        worker_id: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        heartbeat_at: Optional[str] = None,
+        lease_expires_at: Optional[str] = None,
+        attempt_count: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         existing = self.get_rustfs_event(event_id)
         if existing is None:
@@ -725,6 +912,11 @@ class MetadataStore:
             SET status = ?,
                 result_json = ?,
                 error_message = ?,
+                worker_id = ?,
+                claimed_at = ?,
+                heartbeat_at = ?,
+                lease_expires_at = ?,
+                attempt_count = ?,
                 updated_at = ?
             WHERE event_id = ?
             """,
@@ -735,6 +927,11 @@ class MetadataStore:
                     ensure_ascii=False,
                 ),
                 error_message,
+                worker_id if worker_id is not None else existing.get("worker_id"),
+                claimed_at if claimed_at is not None else existing.get("claimed_at"),
+                heartbeat_at if heartbeat_at is not None else existing.get("heartbeat_at"),
+                lease_expires_at if lease_expires_at is not None else existing.get("lease_expires_at"),
+                int(attempt_count if attempt_count is not None else existing.get("attempt_count") or 0),
                 now,
                 event_id,
             ),
@@ -756,17 +953,27 @@ class MetadataStore:
         finally:
             cursor.close()
 
-    def list_rustfs_events(self, kb_id: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    def list_rustfs_events(
+        self,
+        kb_id: Optional[str] = None,
+        limit: int = 20,
+        *,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
         if kb_id:
-            cursor = self._execute(
-                "SELECT * FROM rustfs_events WHERE kb_id = ? ORDER BY created_at DESC LIMIT ?",
-                (kb_id, limit),
-            )
-        else:
-            cursor = self._execute(
-                "SELECT * FROM rustfs_events ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            )
+            clauses.append("kb_id = ?")
+            params.append(kb_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        sql = "SELECT * FROM rustfs_events"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        cursor = self._execute(sql, params)
         try:
             events: List[Dict[str, Any]] = []
             for row in cursor.fetchall():
@@ -797,6 +1004,76 @@ class MetadataStore:
             return counts
         finally:
             cursor.close()
+
+    def touch_rustfs_event_lease(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> Optional[Dict[str, Any]]:
+        existing = self.get_rustfs_event(event_id)
+        if existing is None:
+            return None
+        now = utc_now()
+        self._execute(
+            """
+            UPDATE rustfs_events
+            SET worker_id = ?,
+                heartbeat_at = ?,
+                lease_expires_at = ?,
+                updated_at = ?
+            WHERE event_id = ? AND status = 'running'
+            """,
+            (
+                worker_id,
+                now,
+                self._future_utc_iso(lease_seconds),
+                now,
+                event_id,
+            ),
+        )
+        self.conn.commit()
+        return self.get_rustfs_event(event_id)
+
+    def finish_rustfs_event(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        result: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        existing = self.get_rustfs_event(event_id)
+        if existing is None:
+            return None
+        now = utc_now()
+        self._execute(
+            """
+            UPDATE rustfs_events
+            SET status = ?,
+                result_json = ?,
+                error_message = ?,
+                worker_id = NULL,
+                claimed_at = NULL,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE event_id = ?
+            """,
+            (
+                status,
+                json.dumps(
+                    result if result is not None else existing.get("result_json") or {},
+                    ensure_ascii=False,
+                ),
+                error_message,
+                now,
+                event_id,
+            ),
+        )
+        self.conn.commit()
+        return self.get_rustfs_event(event_id)
 
     def create_operation_span(
         self,
@@ -880,6 +1157,32 @@ class MetadataStore:
         self.conn.commit()
         return self.get_operation_span(span_id)
 
+    def update_operation_span(
+        self,
+        *,
+        span_id: str,
+        details: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        existing = self.get_operation_span(span_id)
+        if existing is None:
+            return None
+        self._execute(
+            """
+            UPDATE operation_spans
+            SET details_json = ?,
+                error_message = COALESCE(?, error_message)
+            WHERE span_id = ?
+            """,
+            (
+                json.dumps(details or existing.get("details_json") or {}, ensure_ascii=False),
+                error_message,
+                span_id,
+            ),
+        )
+        self.conn.commit()
+        return self.get_operation_span(span_id)
+
     def get_operation_span(self, span_id: str) -> Optional[Dict[str, Any]]:
         cursor = self._execute(
             "SELECT * FROM operation_spans WHERE span_id = ?",
@@ -929,7 +1232,141 @@ class MetadataStore:
         finally:
             cursor.close()
 
-    def claim_rustfs_events(self, limit: int = 10) -> List[Dict[str, Any]]:
+    def abandon_operation_spans(
+        self,
+        *,
+        event_ids: Optional[Iterable[str]] = None,
+        task_ids: Optional[Iterable[str]] = None,
+        reason: str,
+        limit: int = 500,
+    ) -> List[str]:
+        event_id_set = {str(item).strip() for item in (event_ids or []) if str(item).strip()}
+        task_id_set = {str(item).strip() for item in (task_ids or []) if str(item).strip()}
+        if not event_id_set and not task_id_set:
+            return []
+
+        matching_trace_ids: set[str] = set()
+        running_rows = self.list_operation_spans(status="running", limit=max(1, limit))
+        for row in running_rows:
+            event_id = str(row.get("event_id") or "").strip()
+            task_id = str(row.get("task_id") or "").strip()
+            if event_id in event_id_set or task_id in task_id_set:
+                trace_id = str(row.get("trace_id") or "").strip()
+                if trace_id:
+                    matching_trace_ids.add(trace_id)
+
+        abandoned: List[str] = []
+        now = utc_now()
+        for row in running_rows:
+            event_id = str(row.get("event_id") or "").strip()
+            task_id = str(row.get("task_id") or "").strip()
+            trace_id = str(row.get("trace_id") or "").strip()
+            if (
+                event_id not in event_id_set
+                and task_id not in task_id_set
+                and trace_id not in matching_trace_ids
+            ):
+                continue
+            started_at = self._parse_iso_ts(str(row.get("started_at") or ""))
+            ended_at = self._parse_iso_ts(now) or datetime.now(timezone.utc)
+            duration_ms = 0.0
+            if started_at is not None:
+                duration_ms = max(0.0, (ended_at - started_at).total_seconds() * 1000.0)
+            details = dict(row.get("details_json") or {})
+            details["abandon_reason"] = reason
+            self.finish_operation_span(
+                span_id=str(row["span_id"]),
+                status="abandoned",
+                ended_at=now,
+                duration_ms=duration_ms,
+                details=details,
+                error_message=reason,
+            )
+            abandoned.append(str(row["span_id"]))
+        return abandoned
+
+    def reconcile_orphaned_operation_spans(self, *, limit: int = 500) -> List[str]:
+        terminal_statuses = {"abandoned", "cancelled", "failed"}
+        running_rows = self.list_operation_spans(status="running", limit=max(1, limit))
+        if not running_rows:
+            return []
+
+        traces: Dict[str, List[Dict[str, Any]]] = {}
+        for row in running_rows:
+            trace_id = str(row.get("trace_id") or "").strip()
+            if not trace_id or trace_id in traces:
+                continue
+            traces[trace_id] = self.list_operation_spans(trace_id=trace_id, limit=max(20, limit))
+
+        abandoned: List[str] = []
+        now = utc_now()
+        for row in running_rows:
+            trace_id = str(row.get("trace_id") or "").strip()
+            trace_rows = traces.get(trace_id, [])
+            by_span_id = {str(item.get("span_id") or ""): item for item in trace_rows}
+            parent_span_id = str(row.get("parent_span_id") or "").strip()
+            should_abandon = False
+            while parent_span_id:
+                parent = by_span_id.get(parent_span_id)
+                if parent is None:
+                    break
+                if str(parent.get("status") or "") in terminal_statuses:
+                    should_abandon = True
+                    break
+                parent_span_id = str(parent.get("parent_span_id") or "").strip()
+            if not should_abandon:
+                continue
+
+            started_at = self._parse_iso_ts(str(row.get("started_at") or ""))
+            ended_at = self._parse_iso_ts(now) or datetime.now(timezone.utc)
+            duration_ms = 0.0
+            if started_at is not None:
+                duration_ms = max(0.0, (ended_at - started_at).total_seconds() * 1000.0)
+            details = dict(row.get("details_json") or {})
+            details["abandon_reason"] = "Parent span already reached a terminal state"
+            self.finish_operation_span(
+                span_id=str(row["span_id"]),
+                status="abandoned",
+                ended_at=now,
+                duration_ms=duration_ms,
+                details=details,
+                error_message="Parent span already reached a terminal state",
+            )
+            abandoned.append(str(row["span_id"]))
+        return abandoned
+
+    def reconcile_runtime_state(
+        self,
+        *,
+        task_timeout_seconds: float,
+        event_lease_seconds: float,
+        event_max_attempts: int,
+    ) -> Dict[str, List[str]]:
+        stale_tasks = self.reconcile_stale_tasks(timeout_seconds=task_timeout_seconds)
+        event_result = self.reconcile_expired_rustfs_events(
+            lease_seconds=event_lease_seconds,
+            max_attempts=event_max_attempts,
+        )
+        abandoned_spans = self.abandon_operation_spans(
+            task_ids=[str(task["task_id"]) for task in stale_tasks],
+            event_ids=[*event_result["requeued"], *event_result["failed"]],
+            reason="Runtime lease/heartbeat expired before completion",
+        )
+        abandoned_spans.extend(self.reconcile_orphaned_operation_spans())
+        return {
+            "cancelled_tasks": [str(task["task_id"]) for task in stale_tasks],
+            "requeued_events": event_result["requeued"],
+            "failed_events": event_result["failed"],
+            "abandoned_spans": abandoned_spans,
+        }
+
+    def claim_rustfs_events(
+        self,
+        *,
+        limit: int = 10,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> List[Dict[str, Any]]:
         if self.backend_name == "sqlite":
             self.conn.execute("BEGIN IMMEDIATE")
             lock_clause = ""
@@ -953,11 +1390,22 @@ class MetadataStore:
             event_ids = [str(row["event_id"]) for row in rows]
             if event_ids:
                 now = utc_now()
-                update_rows = [(now, event_id) for event_id in event_ids]
+                lease_expires_at = self._future_utc_iso(lease_seconds)
+                update_rows = [
+                    (worker_id, now, now, lease_expires_at, now, event_id)
+                    for event_id in event_ids
+                ]
                 cursor = self._executemany(
                     """
                     UPDATE rustfs_events
-                    SET status = 'running', updated_at = ?
+                    SET status = 'running',
+                        error_message = NULL,
+                        worker_id = ?,
+                        claimed_at = ?,
+                        heartbeat_at = ?,
+                        lease_expires_at = ?,
+                        attempt_count = COALESCE(attempt_count, 0) + 1,
+                        updated_at = ?
                     WHERE event_id = ? AND status = 'queued'
                     """,
                     update_rows,
@@ -978,5 +1426,82 @@ class MetadataStore:
             if event is None:
                 continue
             event["status"] = "running"
+            event["worker_id"] = worker_id
+            event["claimed_at"] = now
+            event["heartbeat_at"] = now
+            event["lease_expires_at"] = lease_expires_at
+            event["attempt_count"] = int(event.get("attempt_count") or 0) + 1
             claimed.append(event)
         return claimed
+
+    def reconcile_expired_rustfs_events(
+        self,
+        *,
+        lease_seconds: float,
+        max_attempts: int,
+        limit: int = 200,
+    ) -> Dict[str, List[str]]:
+        now_dt = datetime.now(timezone.utc)
+        expired: List[Dict[str, Any]] = []
+        for event in self.list_rustfs_events(limit=max(1, limit), status="running"):
+            lease_expires = self._parse_iso_ts(str(event.get("lease_expires_at") or ""))
+            fallback = self._parse_iso_ts(str(event.get("updated_at") or ""))
+            expires_at = lease_expires or (
+                fallback + timedelta(seconds=max(0.0, float(lease_seconds))) if fallback else None
+            )
+            if expires_at is None or expires_at > now_dt:
+                continue
+            expired.append(event)
+
+        if not expired:
+            return {"requeued": [], "failed": []}
+
+        requeued_ids: List[str] = []
+        failed_ids: List[str] = []
+        now = utc_now()
+        for event in expired:
+            event_id = str(event["event_id"])
+            attempt_count = int(event.get("attempt_count") or 0)
+            worker_id = str(event.get("worker_id") or "")
+            if attempt_count >= max(1, int(max_attempts)):
+                self._execute(
+                    """
+                    UPDATE rustfs_events
+                    SET status = 'failed',
+                        error_message = ?,
+                        worker_id = NULL,
+                        claimed_at = NULL,
+                        heartbeat_at = NULL,
+                        lease_expires_at = NULL,
+                        updated_at = ?
+                    WHERE event_id = ? AND status = 'running'
+                    """,
+                    (
+                        f"Event lease expired after {attempt_count} attempts (worker={worker_id or 'unknown'})",
+                        now,
+                        event_id,
+                    ),
+                )
+                failed_ids.append(event_id)
+            else:
+                self._execute(
+                    """
+                    UPDATE rustfs_events
+                    SET status = 'queued',
+                        error_message = ?,
+                        worker_id = NULL,
+                        claimed_at = NULL,
+                        heartbeat_at = NULL,
+                        lease_expires_at = NULL,
+                        updated_at = ?
+                    WHERE event_id = ? AND status = 'running'
+                    """,
+                    (
+                        f"Event lease expired; requeued from worker={worker_id or 'unknown'}",
+                        now,
+                        event_id,
+                    ),
+                )
+                requeued_ids.append(event_id)
+        self.conn.commit()
+        return {"requeued": requeued_ids, "failed": failed_ids}

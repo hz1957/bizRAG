@@ -116,7 +116,7 @@ class ReadService:
     ) -> Dict[str, Any]:
         kb = self._get_kb(kb_id)
         return build_read_pipeline_payload(
-            server_parameters_path=str(kb["retriever_config_path"]),
+            kb=kb,
             query=query,
             top_k=top_k,
             query_instruction=query_instruction,

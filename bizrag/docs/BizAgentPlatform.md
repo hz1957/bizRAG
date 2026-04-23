@@ -734,7 +734,7 @@ Rust 文档系统建议向 BizAgentPlatform 推送如下事件：
 python -m bizrag.entrypoints.kb_admin_cli \
   register-kb \
   --kb-id bizrag_bcrp \
-  --retriever-config bizrag/servers/retriever/parameter.local.yaml \
+  --source-parameters-path bizrag/servers/retriever/parameter.local.yaml \
   --source-root raw_knowledge/真实案例
 ```
 

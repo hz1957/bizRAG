@@ -85,8 +85,8 @@ websearch_backend_configs:
 
 batch_size: 16
 retriever_batch_size: 16
-top_k: 5
-retrieval_top_k: 5
+top_k: 12
+retrieval_top_k: 12
 gpu_ids: null
 retriever_gpu_ids: null
 query_instruction: ""

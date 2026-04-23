@@ -27,7 +27,10 @@ def parse_args() -> argparse.Namespace:
 
     register = subparsers.add_parser("register-kb")
     register.add_argument("--kb-id", required=True)
-    register.add_argument("--retriever-config", required=True)
+    register.add_argument(
+        "--source-parameters-path",
+        required=True,
+    )
     register.add_argument("--collection-name")
     register.add_argument("--display-name")
     register.add_argument("--source-root")
@@ -39,13 +42,14 @@ def parse_args() -> argparse.Namespace:
     ingest.add_argument("--sync-deletions", action="store_true")
     ingest.add_argument("--force", action="store_true")
     ingest.add_argument("--prefer-mineru", action="store_true")
-    ingest.add_argument("--chunk-backend", default="sentence")
-    ingest.add_argument("--chunk-size", type=int, default=512)
-    ingest.add_argument("--chunk-overlap", type=int, default=50)
 
     delete = subparsers.add_parser("delete-document")
     delete.add_argument("--kb-id", required=True)
     delete.add_argument("--source-uri", required=True)
+
+    delete_kb = subparsers.add_parser("delete-kb")
+    delete_kb.add_argument("--kb-id", required=True)
+    delete_kb.add_argument("--force", action="store_true")
 
     rebuild = subparsers.add_parser("rebuild-kb")
     rebuild.add_argument("--kb-id", required=True)
@@ -75,7 +79,7 @@ async def run_command(args: argparse.Namespace) -> Dict[str, Any]:
         if args.command == "register-kb":
             return admin.register_kb(
                 kb_id=args.kb_id,
-                retriever_config_path=args.retriever_config,
+                source_parameters_path=args.source_parameters_path,
                 collection_name=args.collection_name,
                 display_name=args.display_name,
                 source_root=args.source_root,
@@ -88,14 +92,16 @@ async def run_command(args: argparse.Namespace) -> Dict[str, Any]:
                 sync_deletions=args.sync_deletions,
                 force=args.force,
                 prefer_mineru=args.prefer_mineru,
-                chunk_backend=args.chunk_backend,
-                chunk_size=args.chunk_size,
-                chunk_overlap=args.chunk_overlap,
             )
         if args.command == "delete-document":
             return await admin.delete_document(
                 kb_id=args.kb_id,
                 source_uri=args.source_uri,
+            )
+        if args.command == "delete-kb":
+            return await admin.delete_kb(
+                kb_id=args.kb_id,
+                force=args.force,
             )
         if args.command == "rebuild-kb":
             return await admin.rebuild_kb(kb_id=args.kb_id)

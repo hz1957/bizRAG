@@ -108,6 +108,14 @@ def _build_process_commands() -> Dict[str, List[str]]:
             os.environ.get("BIZRAG_WORKER_POLL_INTERVAL", "2.0"),
             "--batch-size",
             os.environ.get("BIZRAG_WORKER_BATCH_SIZE", "10"),
+            "--lease-seconds",
+            os.environ.get("BIZRAG_WORKER_LEASE_SECONDS", "45.0"),
+            "--heartbeat-interval",
+            os.environ.get("BIZRAG_WORKER_HEARTBEAT_INTERVAL", "15.0"),
+            "--max-attempts",
+            os.environ.get("BIZRAG_WORKER_MAX_ATTEMPTS", "3"),
+            "--task-timeout-seconds",
+            os.environ.get("BIZRAG_TASK_TIMEOUT_SECONDS", "120.0"),
         ]
 
     if _env_flag("BIZRAG_RUN_API", True):

@@ -25,11 +25,17 @@ class Settings:
     watch_enabled: bool
     watch_root: str
     watch_tenant_id: str
-    watch_kb_id: str
+    watch_default_kb_id: str
     watch_recursive: bool
     watch_initial_scan: bool
     watch_debounce_seconds: float
     watch_delete_sync: bool
+    watch_reconcile_interval_seconds: float
+    watch_auto_register_enabled: bool
+    watch_auto_register_url: str
+    watch_auto_register_source_parameters_path: str
+    watch_auto_register_source_root_prefix: str
+    watch_auto_register_timeout_seconds: float
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -69,11 +75,33 @@ def _load() -> Settings:
         watch_enabled=_env_bool("FILE_SERVICE_WATCH_ENABLED", False),
         watch_root=os.environ.get("FILE_SERVICE_WATCH_ROOT", "runtime/file_service/watch"),
         watch_tenant_id=os.environ.get("FILE_SERVICE_WATCH_TENANT_ID", "default"),
-        watch_kb_id=os.environ.get("FILE_SERVICE_WATCH_KB_ID", "default"),
+        watch_default_kb_id=os.environ.get(
+            "FILE_SERVICE_WATCH_DEFAULT_KB_ID",
+            os.environ.get("FILE_SERVICE_WATCH_KB_ID", "default"),
+        ),
         watch_recursive=_env_bool("FILE_SERVICE_WATCH_RECURSIVE", True),
         watch_initial_scan=_env_bool("FILE_SERVICE_WATCH_INITIAL_SCAN", True),
         watch_debounce_seconds=float(os.environ.get("FILE_SERVICE_WATCH_DEBOUNCE_SECONDS", "1.0")),
         watch_delete_sync=_env_bool("FILE_SERVICE_WATCH_DELETE_SYNC", True),
+        watch_reconcile_interval_seconds=float(
+            os.environ.get("FILE_SERVICE_WATCH_RECONCILE_INTERVAL_SECONDS", "5.0")
+        ),
+        watch_auto_register_enabled=_env_bool("FILE_SERVICE_WATCH_AUTO_REGISTER_ENABLED", False),
+        watch_auto_register_url=os.environ.get(
+            "FILE_SERVICE_WATCH_AUTO_REGISTER_URL",
+            "",
+        ),
+        watch_auto_register_source_parameters_path=os.environ.get(
+            "FILE_SERVICE_WATCH_AUTO_REGISTER_SOURCE_PARAMETERS_PATH",
+            "",
+        ),
+        watch_auto_register_source_root_prefix=os.environ.get(
+            "FILE_SERVICE_WATCH_AUTO_REGISTER_SOURCE_ROOT_PREFIX",
+            "",
+        ),
+        watch_auto_register_timeout_seconds=float(
+            os.environ.get("FILE_SERVICE_WATCH_AUTO_REGISTER_TIMEOUT_SECONDS", "30.0")
+        ),
     )
 
 

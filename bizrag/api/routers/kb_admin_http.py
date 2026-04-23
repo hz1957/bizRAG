@@ -24,7 +24,7 @@ async def register_kb(req: RegisterKBRequest, request: Request) -> Dict[str, Any
     try:
         return admin.register_kb(
             kb_id=req.kb_id,
-            retriever_config_path=req.retriever_config,
+            source_parameters_path=req.source_parameters_path,
             collection_name=req.collection_name,
             display_name=req.display_name,
             source_root=req.source_root,
@@ -42,6 +42,22 @@ async def list_kbs(request: Request) -> Dict[str, Any]:
     return {"items": admin.store.list_kbs()}
 
 
+@router.delete("/api/v1/admin/kbs/{kb_id}")
+async def delete_kb(kb_id: str, request: Request, force: bool = False) -> Dict[str, Any]:
+    require_admin(request)
+    try:
+        return await run_admin_async(
+            request,
+            "delete_kb",
+            kb_id=kb_id,
+            force=force,
+        )
+    except ServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/api/v1/admin/kbs/ingest")
 async def ingest_kb_path(req: IngestPathRequest, request: Request) -> Dict[str, Any]:
     require_admin(request)
@@ -54,9 +70,6 @@ async def ingest_kb_path(req: IngestPathRequest, request: Request) -> Dict[str, 
             sync_deletions=req.sync_deletions,
             force=req.force,
             prefer_mineru=req.prefer_mineru,
-            chunk_backend=req.chunk_backend,
-            chunk_size=req.chunk_size,
-            chunk_overlap=req.chunk_overlap,
         )
     except ServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

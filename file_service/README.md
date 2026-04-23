@@ -112,12 +112,28 @@ curl -F "kb_id=test_kb" -F "tenant_id=tenant_a" -F "file_name=demo.txt" \
 
 - `FILE_SERVICE_WATCH_ENABLED`：总开关
 - `FILE_SERVICE_WATCH_ROOT`：监听目录（在容器内建议 `/data/watch`）
-- `FILE_SERVICE_WATCH_KB_ID`：监听文件落库到的 kb_id
+- `FILE_SERVICE_WATCH_DEFAULT_KB_ID`：兼容单 KB 模式时，直接放在 `watch_root` 下文件的默认 kb_id
 - `FILE_SERVICE_WATCH_TENANT_ID`：监听文件 tenant_id
 - `FILE_SERVICE_WATCH_RECURSIVE`：是否递归
 - `FILE_SERVICE_WATCH_INITIAL_SCAN`：启动时是否扫描既有文件
 - `FILE_SERVICE_WATCH_DEBOUNCE_SECONDS`：事件抖动等待（秒）
 - `FILE_SERVICE_WATCH_DELETE_SYNC`：删除时是否推送 `document.deleted`
+- `FILE_SERVICE_WATCH_RECONCILE_INTERVAL_SECONDS`：周期性全量对账间隔（秒），用于补偿 bind mount / 重启期间漏掉的 create/update/delete 事件
+- `FILE_SERVICE_WATCH_AUTO_REGISTER_ENABLED`：是否在首次看到 `<watch_root>/<kb_id>/` 时自动注册 KB
+- `FILE_SERVICE_WATCH_AUTO_REGISTER_URL`：BizRAG 的 `register-kb` 接口地址
+- `FILE_SERVICE_WATCH_AUTO_REGISTER_SOURCE_PARAMETERS_PATH`：自动注册 KB 时传给 BizRAG 的 `source_parameters_path`
+- `FILE_SERVICE_WATCH_AUTO_REGISTER_SOURCE_ROOT_PREFIX`：可选，自动注册时写入 KB metadata 的 `source_root` 前缀
+- `FILE_SERVICE_WATCH_AUTO_REGISTER_TIMEOUT_SECONDS`：自动注册请求超时
+
+目录映射规则：
+
+- 推荐多 KB 布局：`<watch_root>/<kb_id>/...`
+- 例如：`/data/watch/contracts_compose_auto/a.docx` -> `kb_id=contracts_compose_auto`
+- 例如：`/data/watch/my_new_kb/folder/b.xlsx` -> `kb_id=my_new_kb`
+- 若开启 auto-register，新建空目录 `/data/watch/my_new_kb/` 也会先向 BizRAG 注册一个同名 KB
+- 若删除整个 `/data/watch/<kb_id>/` 目录，watcher 会先同步删除该 KB 下文件，再在该 KB 已无 active 文件时自动调用 BizRAG `delete-kb --force` 清理 KB
+- 不要把 `<watch_root>/<kb_id>` 改名为 `<watch_root>/<kb_id>.stop` 之类仍留在 watch_root 下的目录；这会被视为一个新的 `kb_id`
+- 兼容旧布局：直接放在 `<watch_root>/` 下的文件仍会进入 `FILE_SERVICE_WATCH_DEFAULT_KB_ID`
 
 ## 联调（可快速验收）
 

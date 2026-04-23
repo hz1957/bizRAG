@@ -26,16 +26,31 @@ pipeline:
     input:
       ret_items: ret_items
       temp_items: temp_items
+      top_k: $top_k
+      strategy: $strategy
+      rrf_k: $rrf_k
+      primary_weight: $primary_weight
+      secondary_weight: $secondary_weight
 - reranker.reranker_init
 - reranker.reranker_rerank_items:
     input:
       query_list: q_ls
-- custom.retrieve_items_to_passages
+      ret_items: ret_items
+      top_k: $top_k
+      query_instruction: $query_instruction
+- custom.retrieve_items_to_passages:
+    input:
+      ret_items: ret_items
 - prompt_builder.qa_rag_boxed:
     input:
       q_ls: q_ls
+      ret_psg: ret_psg
+      template: $template
 - generation.generation_init
-- generation.generate
+- generation.generate:
+    input:
+      prompt_ls: prompt_ls
+      system_prompt: $system_prompt
 - custom.output_extract_from_boxed
 - evaluation.evaluate:
     input:

@@ -68,7 +68,7 @@ async def ops_spans(
 async def ops_files(
     request: Request,
     kb_id: Optional[str] = None,
-    limit: int = 30,
+    limit: int = 100,
     chunk_preview: int = 12,
 ) -> Dict[str, Any]:
     admin = require_admin(request)
