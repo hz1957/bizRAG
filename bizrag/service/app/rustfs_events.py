@@ -271,6 +271,7 @@ def _event_source_uri(req: RustFSEventRequest) -> Optional[str]:
 
 async def _process_rustfs_event(
     *,
+    admin: KBAdmin,
     req: RustFSEventRequest,
     event_id: str,
     run_admin_async: RunAdminAsync,
@@ -489,6 +490,7 @@ async def handle_rustfs_event_request(
             details={"event_type": req.event_type.strip().lower(), "replay_of": replay_of},
         ) as span:
             result = await _process_rustfs_event(
+                admin=admin,
                 req=req,
                 event_id=event_id,
                 run_admin_async=run_admin_async,

@@ -22,3 +22,8 @@ logs/
 output/
 state/
 bizrag/state/
+
+# RAG eval local workspace
+rag_eval_workspace/*
+!rag_eval_workspace/README.md
+!rag_eval_workspace/run_m_ric_huggingface_doc.sh

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from bizrag.common.time_utils import utc_now
+from bizrag.infra.metadata_store import MetadataStore
 
 
 DEFAULT_FILE_SERVICE_DB = "/app/runtime/file_service/state/metadata.db"
@@ -28,6 +29,7 @@ class FileServiceInventoryService:
         database_path: str | Path | None = None,
         storage_root: str | Path | None = None,
         workspace_root: str | Path | None = None,
+        metadata_store: MetadataStore | None = None,
     ) -> None:
         self._database_path = Path(
             database_path or os.getenv("BIZRAG_FILE_SERVICE_DB", DEFAULT_FILE_SERVICE_DB)
@@ -41,6 +43,7 @@ class FileServiceInventoryService:
         self._workspace_root = Path(
             workspace_root or os.getenv("BIZRAG_WORKSPACE_ROOT", DEFAULT_WORKSPACE_ROOT)
         )
+        self._metadata_store = metadata_store
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._database_path))
@@ -164,6 +167,29 @@ class FileServiceInventoryService:
                     continue
         return chunks_by_source
 
+    def _document_inventory_for_files(
+        self,
+        *,
+        files: List[Dict[str, Any]],
+    ) -> Dict[tuple[str, str], Dict[str, Any]]:
+        if self._metadata_store is None:
+            return {}
+        kb_ids = sorted(
+            {
+                str(item.get("kb_id") or "").strip()
+                for item in files
+                if str(item.get("kb_id") or "").strip()
+            }
+        )
+        documents_by_source: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for kb_id in kb_ids:
+            for row in self._metadata_store.list_documents(kb_id, include_deleted=True):
+                source_uri = str(row.get("source_uri") or "").strip()
+                if not source_uri:
+                    continue
+                documents_by_source[(kb_id, source_uri)] = row
+        return documents_by_source
+
     def build_inventory(
         self,
         *,
@@ -176,13 +202,26 @@ class FileServiceInventoryService:
             files=files,
             chunk_preview=chunk_preview,
         )
+        documents_by_source = self._document_inventory_for_files(files=files)
         items: List[Dict[str, Any]] = []
         for item in files:
+            current_kb_id = str(item.get("kb_id") or "").strip()
+            current_source_uri = str(item.get("source_uri") or "").strip()
             storage_key = str(item.get("storage_key") or "")
-            chunk_data = chunks_by_source.get(str(item.get("source_uri") or ""), {})
+            chunk_data = chunks_by_source.get(current_source_uri, {})
+            document_data = documents_by_source.get((current_kb_id, current_source_uri), {})
             items.append(
                 {
                     **item,
+                    "status": str(document_data.get("status") or item.get("status") or ""),
+                    "updated_at": str(
+                        document_data.get("updated_at") or item.get("updated_at") or ""
+                    ),
+                    "watch_status": item.get("status"),
+                    "document_status": document_data.get("status"),
+                    "document_updated_at": document_data.get("updated_at"),
+                    "corpus_path": document_data.get("corpus_path"),
+                    "chunk_path": document_data.get("chunk_path"),
                     "storage_path": str(self._storage_root / storage_key) if storage_key else None,
                     "chunk_count": int(chunk_data.get("chunk_count") or 0),
                     "chunk_file": chunk_data.get("chunk_file"),

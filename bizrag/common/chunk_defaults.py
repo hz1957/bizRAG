@@ -65,8 +65,9 @@ def build_chunk_pipeline_overrides(
     raw_chunk_path: str,
     chunk_path: str,
     use_title: bool,
+    chunk_settings: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    settings = current_chunk_settings()
+    settings = deepcopy(chunk_settings or current_chunk_settings())
     backend_configs = deepcopy(CORPUS_CHUNK_DEFAULTS["chunk_backend_configs"])
     for backend_name in ("token", "sentence"):
         cfg = backend_configs.setdefault(backend_name, {})

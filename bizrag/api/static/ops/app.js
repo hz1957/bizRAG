@@ -15,6 +15,26 @@ let currentKbActivity = [];
 let currentOpsTab = "overview";
 
 const OPS_TABS = new Set(["overview", "activity", "query", "files"]);
+const QUERY_KB_STORAGE_KEY = "bizrag.ops.queryKbId";
+
+function loadPreferredQueryKb() {
+  try {
+    return window.localStorage?.getItem(QUERY_KB_STORAGE_KEY) || "";
+  } catch (_err) {
+    return "";
+  }
+}
+
+function savePreferredQueryKb(value) {
+  try {
+    if (!value) {
+      window.localStorage?.removeItem(QUERY_KB_STORAGE_KEY);
+      return;
+    }
+    window.localStorage?.setItem(QUERY_KB_STORAGE_KEY, String(value));
+  } catch (_err) {
+  }
+}
 
 function esc(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -512,14 +532,19 @@ function renderKbOptions(items) {
   currentKbItems = Array.isArray(items) ? items : [];
   const select = document.getElementById("query-kb-id");
   if (!select) return;
+  const previousValue = String(select.value || "");
   const options = currentKbItems.map((item) => {
     const kbId = String(item.kb_id || "");
     return `<option value="${esc(kbId)}">${esc(kbId)}</option>`;
   });
   select.innerHTML = options.length ? options.join("") : '<option value="">No KBs</option>';
-  const preferred = currentKbItems.find((item) => String(item.kb_id || "").includes("contracts_compose_auto"));
-  if (preferred) {
-    select.value = String(preferred.kb_id);
+  const candidates = [previousValue, loadPreferredQueryKb()].filter(Boolean);
+  const nextValue = candidates.find((candidate) => (
+    currentKbItems.some((item) => String(item.kb_id || "") === String(candidate))
+  )) || String(currentKbItems[0]?.kb_id || "");
+  if (nextValue) {
+    select.value = nextValue;
+    savePreferredQueryKb(nextValue);
   }
 }
 
@@ -654,9 +679,12 @@ function openFileModal(index) {
     <div><strong>KB</strong>${esc(item.kb_id)}</div>
     <div><strong>Source URI</strong>${esc(item.source_uri)}</div>
     <div><strong>Status</strong>${esc(item.status)}</div>
+    <div><strong>Watch Status</strong>${esc(item.watch_status || "")}</div>
+    <div><strong>Document Status</strong>${esc(item.document_status || "")}</div>
     <div><strong>Version</strong>${esc(item.current_version)}</div>
     <div><strong>Storage Key</strong>${esc(item.storage_key || "")}</div>
     <div><strong>Storage Path</strong>${esc(item.storage_path || "")}</div>
+    <div><strong>Corpus Path</strong>${esc(item.corpus_path || "")}</div>
     <div><strong>Chunk File</strong>${esc(item.chunk_file || "")}</div>
   `;
   const chunks = item.chunks || [];
@@ -759,6 +787,13 @@ async function refreshKbOptions() {
 
 async function bootstrap() {
   switchOpsTab(preferredOpsTab());
+  const kbSelect = document.getElementById("query-kb-id");
+  if (kbSelect && !kbSelect.dataset.persistBound) {
+    kbSelect.addEventListener("change", (event) => {
+      savePreferredQueryKb(event.target?.value || "");
+    });
+    kbSelect.dataset.persistBound = "true";
+  }
   await Promise.all([refreshOverview(), refreshMetrics(), refreshFiles(), refreshKbOptions()]);
   setInterval(() => {
     refreshOverview();

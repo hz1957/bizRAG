@@ -159,6 +159,9 @@ services:
       BIZRAG_MAX_EVENTS_PER_MESSAGE: ${BIZRAG_MAX_EVENTS_PER_MESSAGE:-100}
       BIZRAG_WAIT_FOR: mysql:3306,rabbitmq:5672,milvus:19530
       BIZRAG_WAIT_TIMEOUT: ${BIZRAG_WAIT_TIMEOUT:-90}
+      HF_HOME: /app/.cache/huggingface
+      HF_HUB_CACHE: /app/.cache/huggingface/hub
+      MODELSCOPE_CACHE: /app/.cache/huggingface/hub/modelscope
       MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
     ports:
       - "${BIZRAG_PORT:-64501}:64501"

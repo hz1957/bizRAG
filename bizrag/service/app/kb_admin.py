@@ -13,7 +13,6 @@ import asyncio
 from bizrag.common.observability import observe_operation
 from bizrag.common.chunk_defaults import (
     build_chunk_pipeline_overrides,
-    current_chunk_settings,
 )
 from bizrag.infra.metadata_store import MetadataStore
 from bizrag.common.io_utils import (
@@ -34,6 +33,7 @@ from bizrag.service.app.kb_files import (
     normalize_source_uri,
     should_ingest,
 )
+from bizrag.service.app.write_profile import select_write_profile
 from bizrag.service.app.kb_indexer import KBIndexManager
 from bizrag.service.ultrarag.pipeline_runner import UltraRAGPipelineRunner
 from bizrag.service.ultrarag.server_parameters import load_server_parameters
@@ -606,6 +606,12 @@ class KBAdmin:
                 "chunk_characters": 0,
             }
 
+        write_profile = select_write_profile(
+            file_name=file_name,
+            file_path=file_path,
+            prefer_mineru=prefer_mineru,
+        )
+
         existing = self.store.get_document(kb["kb_id"], source_uri)
         if (
             existing is not None
@@ -628,7 +634,7 @@ class KBAdmin:
             source_uri=source_uri,
             file_path=file_path,
             output_paths=output_paths,
-            prefer_mineru=prefer_mineru,
+            write_profile=write_profile,
         )
         normalized_corpus = normalize_corpus_rows(
             raw_rows=raw_corpus_rows,
@@ -648,6 +654,8 @@ class KBAdmin:
         if progress_span is not None:
             progress_span.annotate(
                 source_type=source_type,
+                write_profile=write_profile["name"],
+                prefer_mineru=bool(write_profile["prefer_mineru"]),
                 corpus_rows=corpus_rows,
                 corpus_characters=corpus_characters,
             )
@@ -661,6 +669,7 @@ class KBAdmin:
                     source_uri=source_uri,
                     raw_chunk_path=str(output_paths["corpus"]),
                     chunk_path=str(temp_chunk_path),
+                    write_profile=write_profile,
                 )
             except Exception as exc:
                 logger.warning(
@@ -712,6 +721,7 @@ class KBAdmin:
         return {
             "result_type": "created" if existing is None or existing.get("status") == "deleted" else "updated",
             "source_type": source_type,
+            "write_profile": write_profile["name"],
             "corpus_rows": corpus_rows,
             "corpus_characters": corpus_characters,
             "chunk_rows": chunk_rows,
@@ -753,7 +763,7 @@ class KBAdmin:
         source_uri: str,
         file_path: Path,
         output_paths: Dict[str, Path],
-        prefer_mineru: bool,
+        write_profile: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         suffix = file_path.suffix.lower()
         if suffix in {".xls", ".xlsx"}:
@@ -784,14 +794,17 @@ class KBAdmin:
                 )
             return rows
 
-        if suffix == ".pdf" and prefer_mineru:
+        if suffix == ".pdf" and bool(write_profile.get("prefer_mineru")):
             async with observe_operation(
                 store=self.store,
                 component="corpus",
                 operation="build_mineru_corpus",
                 kb_id=kb_id,
                 source_uri=source_uri,
-                details={"path": str(file_path)},
+                details={
+                    "path": str(file_path),
+                    "write_profile": write_profile["name"],
+                },
             ) as span:
                 await self._pipeline_runner.run(
                     "build_mineru_corpus",
@@ -821,7 +834,10 @@ class KBAdmin:
             operation="build_text_corpus",
             kb_id=kb_id,
             source_uri=source_uri,
-            details={"path": str(file_path)},
+            details={
+                "path": str(file_path),
+                "write_profile": write_profile["name"],
+            },
         ) as span:
             await self._pipeline_runner.run(
                 "build_text_corpus",
@@ -847,8 +863,8 @@ class KBAdmin:
         source_uri: str,
         raw_chunk_path: str,
         chunk_path: str,
+        write_profile: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
-        chunk_settings = current_chunk_settings()
         async with observe_operation(
             store=self.store,
             component="chunk",
@@ -856,9 +872,10 @@ class KBAdmin:
             kb_id=kb_id,
             source_uri=source_uri,
             details={
-                "chunk_backend": chunk_settings["chunk_backend"],
-                "chunk_size": chunk_settings["chunk_size"],
-                "chunk_overlap": chunk_settings["chunk_overlap"],
+                "write_profile": write_profile["name"],
+                "chunk_backend": write_profile["chunk_backend"],
+                "chunk_size": write_profile["chunk_size"],
+                "chunk_overlap": write_profile["chunk_overlap"],
             },
         ) as span:
             await self._pipeline_runner.run(
@@ -867,7 +884,8 @@ class KBAdmin:
                     "corpus": build_chunk_pipeline_overrides(
                         raw_chunk_path=raw_chunk_path,
                         chunk_path=chunk_path,
-                        use_title=True,
+                        use_title=bool(write_profile.get("use_title", True)),
+                        chunk_settings=write_profile,
                     )
                 },
             )

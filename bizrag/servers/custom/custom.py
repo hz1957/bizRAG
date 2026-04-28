@@ -55,7 +55,9 @@ def build_classic_read_inputs(
 
 
 def _item_key(item: Dict[str, Any], index: int) -> str:
-    for field in ("doc_id", "vector_id", "source_uri"):
+    # Deduplicate at chunk granularity first. Using doc_id here collapses all
+    # chunks from the same document into a single hit after dense/sparse fusion.
+    for field in ("vector_id", "chunk_id", "id", "doc_id", "source_uri"):
         value = item.get(field)
         if value not in (None, ""):
             return f"{field}:{value}"
