@@ -137,11 +137,16 @@ services:
       BIZRAG_RUSTFS_SHARED_SECRET: ${BIZRAG_RUSTFS_SHARED_SECRET:-}
       BIZRAG_ACCELERATOR: ${BIZRAG_ACCELERATOR:-cpu}
       BIZRAG_GPU_IDS: ${BIZRAG_GPU_IDS:-}
-      BIZRAG_HF_OFFLINE: ${BIZRAG_HF_OFFLINE:-true}
+      BIZRAG_HF_OFFLINE: ${BIZRAG_HF_OFFLINE:-false}
       BIZRAG_READ_WARMUP: ${BIZRAG_READ_WARMUP:-true}
       BIZRAG_READ_WARMUP_MODE: ${BIZRAG_READ_WARMUP_MODE:-all}
-      BIZRAG_READ_WARMUP_KB_IDS: ${BIZRAG_READ_WARMUP_KB_IDS:-contracts_compose_auto}
+      BIZRAG_READ_WARMUP_KB_IDS: "${BIZRAG_READ_WARMUP_KB_IDS:-}"
       BIZRAG_HOT_RELOAD: ${BIZRAG_HOT_RELOAD:-false}
+      BIZRAG_BOOTSTRAP_RUNTIME: ${BIZRAG_BOOTSTRAP_RUNTIME:-true}
+      BIZRAG_BOOTSTRAP_MODELS: ${BIZRAG_BOOTSTRAP_MODELS:-true}
+      BIZRAG_BOOTSTRAP_MINERU: ${BIZRAG_BOOTSTRAP_MINERU:-true}
+      BIZRAG_BOOTSTRAP_MINERU_MODEL_TYPE: ${BIZRAG_BOOTSTRAP_MINERU_MODEL_TYPE:-pipeline}
+      BIZRAG_BOOTSTRAP_SOURCE_PARAMETERS_PATH: ${BIZRAG_BOOTSTRAP_SOURCE_PARAMETERS_PATH:-/app/bizrag/servers/retriever/parameter.docker.yaml}
       BIZRAG_RUN_API: "true"
       BIZRAG_RUN_WORKER: "true"
       BIZRAG_RUN_MQ_BRIDGE: "true"
@@ -161,10 +166,25 @@ services:
       BIZRAG_WAIT_TIMEOUT: ${BIZRAG_WAIT_TIMEOUT:-90}
       HF_HOME: /app/.cache/huggingface
       HF_HUB_CACHE: /app/.cache/huggingface/hub
+      HF_TOKEN: ${HF_TOKEN:-}
       MODELSCOPE_CACHE: /app/.cache/huggingface/hub/modelscope
       MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
+      FILE_SERVICE_WATCH_ROOT: /app/runtime/file_service/watch
+      FILE_SERVICE_STORAGE_ROOT: /app/runtime/file_service/storage
+      FILE_SERVICE_DATABASE: /app/runtime/file_service/state/metadata.db
+      FILE_SERVICE_WATCH_DEFAULT_KB_ID: ${FILE_SERVICE_WATCH_DEFAULT_KB_ID:-contracts_compose_auto}
     ports:
       - "${BIZRAG_PORT:-64501}:64501"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:64501/livez >/dev/null || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     volumes:
       - ./bizrag:/app/bizrag
       - ./docker:/app/docker
@@ -182,6 +202,8 @@ services:
     restart: unless-stopped
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      bizrag:
         condition: service_healthy
     environment:
       FILE_SERVICE_HOST: 0.0.0.0

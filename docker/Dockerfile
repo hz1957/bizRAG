@@ -26,7 +26,7 @@ COPY . /app
 
 RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.11.0,<2.12.0"
 
-RUN pip install -e ".[mq]"
+RUN pip install -e ".[mq,eval]"
 
 RUN pip install "mineru[core]>=3.0.0,<4"
 

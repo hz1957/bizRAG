@@ -70,6 +70,8 @@ case "$BIZRAG_METADATA_DB" in
     ;;
 esac
 
+"$PYTHON_BIN" "$APP_ROOT/docker/bootstrap_runtime.py"
+
 wait_for_targets
 
 if [ "$BIZRAG_HOT_RELOAD" = "true" ]; then
